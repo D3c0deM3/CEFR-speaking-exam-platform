@@ -1,6 +1,18 @@
 <template>
   <div class="exam-page" v-if="!isFinished">
     <div class="ambient-bg"></div>
+    <div
+      v-if="isInstructionActive"
+      class="instruction-overlay"
+      :class="{ 'fade-out': isInstructionFading }"
+      aria-live="polite"
+    >
+      <div class="instruction-panel">
+        <span class="instruction-tag">Instruction</span>
+        <h2>{{ instructionTitle }}</h2>
+        <p>{{ instructionMessage }}</p>
+      </div>
+    </div>
     <header class="exam-topbar">
       <div class="brand">
         <span class="brand-title">CEFR Speaking</span>
@@ -40,44 +52,80 @@
 
         <div class="audio-player" v-if="hasQuestionAudio">
           <button
+            v-if="needsManualPlay"
             @click="playQuestionAudio(true)"
             class="play-button"
             :disabled="isPlaying || isRecording"
           >
-            {{ isPlaying ? 'Playing...' : needsManualPlay ? 'Play Question Audio' : 'Replay Audio' }}
+            {{ isPlaying ? 'Playing...' : 'Play Question Audio' }}
           </button>
           <p class="helper-text" v-if="needsManualPlay">
-            Tap play to begin. Recording starts automatically after the audio ends.
-          </p>
-          <p class="helper-text" v-else>
-            Recording begins as soon as the audio ends.
+            Tap play to begin. Recording starts after the bell.
           </p>
         </div>
 
         <div v-else class="no-audio-message">
-          No audio prompt. Recording begins automatically.
+          {{ isPreparing ? 'Preparation time. Recording begins after the bell.' : 'No audio prompt. Recording begins after the bell.' }}
         </div>
 
         <div class="voice-visual" :class="{ active: isRecording }">
-          <div class="voice-orb" aria-hidden="true" :style="orbStyle">
-            <span class="orb-core"></span>
-            <span class="orb-ring"></span>
-            <span class="orb-ring ring-2"></span>
-            <svg class="orb-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <div class="voice-waves" aria-hidden="true" :style="waveStyle">
+            <svg class="wave-svg" viewBox="0 0 600 120" role="presentation">
+              <defs>
+                <linearGradient id="waveGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+                  <stop offset="0%" stop-color="#38bdf8" />
+                  <stop offset="45%" stop-color="#6366f1" />
+                  <stop offset="100%" stop-color="#fb7185" />
+                </linearGradient>
+                <linearGradient id="waveAccent" x1="0%" y1="0%" x2="100%" y2="0%">
+                  <stop offset="0%" stop-color="#22d3ee" />
+                  <stop offset="50%" stop-color="#a855f7" />
+                  <stop offset="100%" stop-color="#f97316" />
+                </linearGradient>
+                <filter id="waveGlow" x="-20%" y="-50%" width="140%" height="200%">
+                  <feGaussianBlur stdDeviation="6" result="blur" />
+                  <feMerge>
+                    <feMergeNode in="blur" />
+                    <feMergeNode in="SourceGraphic" />
+                  </feMerge>
+                </filter>
+              </defs>
               <path
-                d="M12 14.5a2.5 2.5 0 0 0 2.5-2.5V7a2.5 2.5 0 0 0-5 0v5a2.5 2.5 0 0 0 2.5 2.5Zm4.5-2.5a4.5 4.5 0 0 1-9 0M12 19v-2m-4 2h8"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="1.6"
-                stroke-linecap="round"
-                stroke-linejoin="round"
+                class="wave-base"
+                d="M0 60 C60 55 120 65 180 60 C240 55 300 65 360 60 C420 55 480 65 540 60 C570 58 600 60 600 60"
+              />
+              <path
+                class="wave wave-1"
+                d="M0 60 C60 20 120 100 180 60 C240 20 300 100 360 60 C420 20 480 100 540 60 C570 50 600 60 600 60"
+              />
+              <path
+                class="wave wave-2"
+                d="M0 60 C70 40 140 80 210 60 C280 40 350 80 420 60 C490 40 560 80 600 60"
+              />
+              <path
+                class="wave wave-3"
+                d="M0 60 C80 55 160 65 240 60 C320 55 400 65 480 60 C560 55 600 60 600 60"
+              />
+              <path
+                class="wave wave-4"
+                d="M0 60 C90 70 180 50 270 60 C360 70 450 50 540 60 C580 64 600 60 600 60"
+              />
+              <path
+                class="wave wave-5"
+                d="M0 60 C75 30 150 90 225 60 C300 30 375 90 450 60 C525 30 600 60 600 60"
+              />
+              <path
+                class="wave wave-6"
+                d="M0 60 C100 45 200 75 300 60 C400 45 500 75 600 60"
               />
             </svg>
           </div>
-          <span>{{ isRecording ? 'Recording your response' : 'Ready to record' }}</span>
+          <span>
+            {{ isPreparing ? 'Preparation time' : isRecording ? 'Recording your response' : 'Ready to record' }}
+          </span>
         </div>
-        <div class="auto-note" v-if="!isPlaying && !isRecording">
-          Recording starts automatically.
+        <div class="auto-note" v-if="!isPlaying && !isRecording && !isPreparing">
+          Recording starts after the bell.
         </div>
       </section>
 
@@ -90,10 +138,10 @@
           Part 1.2: Look at the image and respond with details and opinions.
         </p>
         <p v-else-if="currentPart === 2">
-          Part 2: Speak for 1-2 minutes on the topic.
+          Part 2: Speak for 1-2 minutes on the prompt.
         </p>
         <p v-else>
-          Part 3: Discussion related to the Part 2 topic.
+          Part 3: One discussion question related to the Part 2 topic.
         </p>
 
         <div class="info-grid">
@@ -141,6 +189,16 @@ const audioChunks = ref([])
 const imageUrl = ref('')
 const isAutoAdvancing = ref(false)
 const audioLevel = ref(0)
+const isInstructionActive = ref(false)
+const isInstructionFading = ref(false)
+const instructionTitle = ref('')
+const instructionMessage = ref('')
+const isPreparing = ref(false)
+const introSequenceDone = ref(false)
+const hasPlayedEndAudio = ref(false)
+const flowLock = ref(false)
+const audioPhase = ref('')
+const lastSectionKey = ref('')
 
 let recordingStartTime = 0
 let activeAudio = null
@@ -152,6 +210,7 @@ let meterAnimationId = null
 let analyserNode = null
 let analyserData = null
 let analyserContext = null
+let pendingAfterQuestionAudio = null
 
 // Computed properties
 const currentPart = computed(() => examStore.currentPart)
@@ -166,6 +225,53 @@ const formattedTime = computed(() => examStore.formattedTime)
 const progress = computed(() => examStore.progress)
 const isFinished = computed(() => examStore.isFinished)
 
+const PREP_SECONDS = 60
+const INSTRUCTION_FADE_MS = 450
+
+const AUDIO_FILES = {
+  intro: 'intro.mp3',
+  intro2: 'intro2.mp3',
+  part1_1: 'part_1.1.mp3',
+  part1_2: 'part_1.2.mp3',
+  part2: 'part_2.mp3',
+  part3: 'part_3.mp3',
+  bell: 'bell_sound.mp3',
+  end: 'end.mp3'
+}
+
+const SECTION_INSTRUCTIONS = {
+  '1-1': {
+    title: 'Part 1.1',
+    message: 'Part 1.1. In this part, I will ask you a few questions about yourself. For each question, you will have 30 seconds to answer. You should speak after this sound.',
+    audio: AUDIO_FILES.part1_1,
+    bellAfter: true
+  },
+  '1-2': {
+    title: 'Part 1.2',
+    message: 'Part 1.2 You will now see two pictures. You will need to answer some questions based on these pictures. You will have 30 seconds to answer each question. Please speak after this sound.',
+    audio: AUDIO_FILES.part1_2,
+    bellAfter: true
+  },
+  '2-0': {
+    title: 'Part 2',
+    message: 'Part 2. In this part, you will be given a picture followed by one question. You do not need to describe the picture, but focus on the question provided. You will have one minute to prepare and two minutes to answer. You will hear this sound when the time for preparation is over.',
+    audio: AUDIO_FILES.part2,
+    bellAfter: true
+  },
+  '3-0': {
+    title: 'Part 3',
+    message: 'Part 3. You will now be given one discussion question related to Part 2. You will have one minute to prepare for the task and two minutes to speak. You will hear this sound when the time for preparation is over.',
+    audio: AUDIO_FILES.part3,
+    bellAfter: true
+  }
+}
+
+const sectionKey = computed(() => `${currentPart.value}-${currentSubPart.value}`)
+const needsPreparation = computed(() => {
+  // Only show the prep timer once per section for Parts 2 and 3.
+  return (currentPart.value === 2 || currentPart.value === 3) && currentQuestion.value === 0
+})
+
 const hasQuestionAudio = computed(() => {
   const audioPath = currentQuestionData.value?.audio_path
   return typeof audioPath === 'string' && audioPath.trim() !== ''
@@ -177,25 +283,27 @@ const hasQuestionImage = computed(() => {
 })
 
 const statusLabel = computed(() => {
-  if (isPlaying.value) return 'Listening to question'
+  if (isPreparing.value) return 'Preparation time'
+  if (isPlaying.value) return audioPhase.value === 'bell' ? 'Starting recording' : 'Listening to question'
   if (isRecording.value) return 'Recording response'
   return 'Ready'
 })
 
-const orbStyle = computed(() => {
+const waveStyle = computed(() => {
   const level = isRecording.value ? audioLevel.value : 0
-  const scale = (0.82 + level * 0.75).toFixed(2)
-  const glow = `${10 + level * 36}px`
+  const scale = (0.75 + level * 4.8).toFixed(2)
+  const glow = `${14 + level * 84}px`
   return {
-    '--orb-level': level.toFixed(3),
-    '--orb-scale': scale,
-    '--orb-glow': glow
+    '--wave-level': level.toFixed(3),
+    '--wave-scale': scale,
+    '--wave-glow': glow
   }
 })
 
-onMounted(() => {
+onMounted(async () => {
   console.log('Exam mounted, questions:', questions.value)
   console.log('Current question data:', currentQuestionData.value)
+  await beginExamSequence()
 })
 
 onUnmounted(() => {
@@ -209,17 +317,184 @@ onUnmounted(() => {
 
 watch(currentQuestionData, async (value) => {
   if (!value || isFinished.value) return
-  await startQuestionFlow()
+  await handleQuestionChange()
 }, { immediate: true })
 
-watch(timeRemaining, (value) => {
-  if (value === 0 && isRecording.value) {
+watch(timeRemaining, async (value) => {
+  if (value !== 0) return
+  if (isPreparing.value) {
+    await completePreparation()
+    return
+  }
+  if (isRecording.value) {
     stopRecording()
   }
 })
 
+watch(isFinished, async (value) => {
+  if (!value || hasPlayedEndAudio.value) return
+  hasPlayedEndAudio.value = true
+  await playSystemAudio(AUDIO_FILES.end, 'instruction')
+})
+
+async function beginExamSequence() {
+  if (introSequenceDone.value || isUnmounting) return
+  await runIntroSequence()
+  introSequenceDone.value = true
+  await handleQuestionChange()
+}
+
+async function handleQuestionChange() {
+  if (flowLock.value || isUnmounting) return
+  if (!introSequenceDone.value || !currentQuestionData.value || isFinished.value) return
+  flowLock.value = true
+  try {
+    const key = sectionKey.value
+    if (key && key !== lastSectionKey.value) {
+      lastSectionKey.value = key
+      await runSectionIntro(key)
+    }
+    await startQuestionFlow()
+  } finally {
+    flowLock.value = false
+  }
+}
+
+async function runIntroSequence() {
+  await showInstructionScreen({
+    title: 'Multilevel Mock exam',
+    message: 'Your exam starts in 10 seconds.',
+    audioFiles: [AUDIO_FILES.intro, AUDIO_FILES.intro2]
+  })
+}
+
+async function runSectionIntro(key) {
+  const config = SECTION_INSTRUCTIONS[key]
+  if (!config) return
+  await showInstructionScreen({
+    title: config.title,
+    message: config.message,
+    audioFiles: [config.audio],
+    bellAfter: config.bellAfter
+  })
+}
+
+async function showInstructionScreen({ title, message, audioFiles, bellAfter }) {
+  if (isUnmounting) return
+  instructionTitle.value = title
+  instructionMessage.value = message
+  isInstructionActive.value = true
+  isInstructionFading.value = false
+  examStore.stopTimer()
+
+  if (Array.isArray(audioFiles)) {
+    await playAudioSequence(audioFiles)
+  }
+
+  if (bellAfter) {
+    await playSystemAudio(AUDIO_FILES.bell, 'bell')
+  }
+
+  await fadeInstructionOut()
+}
+
+async function fadeInstructionOut() {
+  if (isUnmounting) return
+  isInstructionFading.value = true
+  await delay(INSTRUCTION_FADE_MS)
+  isInstructionActive.value = false
+  isInstructionFading.value = false
+}
+
+async function playAudioSequence(files) {
+  for (const file of files) {
+    if (isUnmounting) return
+    await playSystemAudio(file, 'instruction')
+  }
+}
+
+async function playSystemAudio(filename, phase) {
+  if (!filename || isUnmounting) return false
+  try {
+    const audioResult = await loadAudioData(filename)
+    if (!audioResult || !audioResult.data || audioResult.data.length === 0) {
+      throw new Error('No audio data received from backend')
+    }
+    const audioArray = new Uint8Array(audioResult.data)
+    const audioBlob = new Blob([audioArray], { type: resolveAudioType(audioResult.filename) })
+    const audioUrl = URL.createObjectURL(audioBlob)
+
+    cleanupAudio()
+    activeAudioUrl = audioUrl
+    activeAudio = new Audio(audioUrl)
+    isPlaying.value = true
+    audioPhase.value = phase || ''
+
+    return await new Promise((resolve) => {
+      activeAudio.onended = () => {
+        isPlaying.value = false
+        cleanupAudio()
+        resolve(true)
+      }
+      activeAudio.onerror = () => {
+        isPlaying.value = false
+        cleanupAudio()
+        resolve(false)
+      }
+      activeAudio.play().catch(() => {
+        isPlaying.value = false
+        cleanupAudio()
+        resolve(false)
+      })
+    })
+  } catch (error) {
+    isPlaying.value = false
+    cleanupAudio()
+    console.warn('Failed to play audio:', filename, error)
+    return false
+  } finally {
+    audioPhase.value = ''
+  }
+}
+
+async function playBellAndRecord() {
+  if (isUnmounting || isFinished.value) return
+  await playSystemAudio(AUDIO_FILES.bell, 'bell')
+  if (isUnmounting || isFinished.value) return
+  await beginRecording()
+}
+
+async function startPreparation() {
+  if (isUnmounting || isFinished.value) return
+  isPreparing.value = true
+  examStore.stopTimer()
+  examStore.timeRemaining = PREP_SECONDS
+  examStore.startTimer()
+}
+
+async function completePreparation() {
+  if (!isPreparing.value || isUnmounting) return
+  isPreparing.value = false
+  examStore.stopTimer()
+  await playBellAndRecord()
+}
+
+async function runAfterQuestionAudio() {
+  const action = pendingAfterQuestionAudio
+  pendingAfterQuestionAudio = null
+  if (action) {
+    await action()
+  }
+}
+
+function delay(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
+
 async function startQuestionFlow() {
   needsManualPlay.value = false
+  isPreparing.value = false
+  pendingAfterQuestionAudio = null
   cleanupAudio()
   cleanupImage()
 
@@ -227,13 +502,26 @@ async function startQuestionFlow() {
     await loadQuestionImage(currentQuestionData.value.image_path)
   }
 
-  if (hasQuestionAudio.value) {
-    const played = await playQuestionAudio(false)
-    if (!played && !needsManualPlay.value) {
-      await beginRecording()
+  if (needsPreparation.value) {
+    pendingAfterQuestionAudio = async () => {
+      await startPreparation()
     }
   } else {
-    await beginRecording()
+    pendingAfterQuestionAudio = async () => {
+      await playBellAndRecord()
+    }
+  }
+
+  if (hasQuestionAudio.value) {
+    const played = await playQuestionAudio(false)
+    if (!played && !needsManualPlay.value && pendingAfterQuestionAudio) {
+      await runAfterQuestionAudio()
+    }
+    return
+  }
+
+  if (pendingAfterQuestionAudio) {
+    await runAfterQuestionAudio()
   }
 }
 
@@ -262,6 +550,41 @@ function resolveImageType(filename) {
   return 'image/jpeg'
 }
 
+function resolveAudioType(filename) {
+  const ext = filename.split('.').pop()?.toLowerCase()
+  if (ext === 'mp3') return 'audio/mpeg'
+  if (ext === 'm4a') return 'audio/mp4'
+  if (ext === 'ogg') return 'audio/ogg'
+  if (ext === 'webm') return 'audio/webm'
+  return 'audio/wav'
+}
+
+async function loadAudioData(filename) {
+  const candidates = buildAudioCandidates(filename)
+  let lastError = null
+  for (const candidate of candidates) {
+    try {
+      const data = await invoke('get_audio_file', { filename: candidate })
+      return { data, filename: candidate }
+    } catch (error) {
+      lastError = error
+    }
+  }
+  throw lastError || new Error(`Failed to load audio: ${filename}`)
+}
+
+function buildAudioCandidates(filename) {
+  if (!filename) return []
+  if (hasAudioExtension(filename)) return [filename]
+  const extensions = ['.wav', '.mp3', '.m4a', '.ogg', '.webm']
+  const candidates = [filename, ...extensions.map(ext => `${filename}${ext}`)]
+  return [...new Set(candidates)]
+}
+
+function hasAudioExtension(filename) {
+  return /\.(wav|mp3|m4a|ogg|webm)$/i.test(filename)
+}
+
 async function playQuestionAudio(manual) {
   const audioPath = currentQuestionData.value?.audio_path
   if (!audioPath || typeof audioPath !== 'string' || audioPath.trim() === '' || isPlaying.value || isRecording.value) {
@@ -270,15 +593,16 @@ async function playQuestionAudio(manual) {
 
   try {
     isPlaying.value = true
+    audioPhase.value = 'question'
     const filename = audioPath.trim()
-    const audioData = await invoke('get_audio_file', { filename })
+    const audioResult = await loadAudioData(filename)
 
-    if (!audioData || audioData.length === 0) {
+    if (!audioResult || !audioResult.data || audioResult.data.length === 0) {
       throw new Error('No audio data received from backend')
     }
 
-    const audioArray = new Uint8Array(audioData)
-    const audioBlob = new Blob([audioArray], { type: 'audio/wav' })
+    const audioArray = new Uint8Array(audioResult.data)
+    const audioBlob = new Blob([audioArray], { type: resolveAudioType(audioResult.filename) })
     const audioUrl = URL.createObjectURL(audioBlob)
 
     cleanupAudio()
@@ -288,13 +612,13 @@ async function playQuestionAudio(manual) {
     activeAudio.onended = async () => {
       isPlaying.value = false
       cleanupAudio()
-      await beginRecording()
+      await runAfterQuestionAudio()
     }
 
     activeAudio.onerror = async () => {
       isPlaying.value = false
       cleanupAudio()
-      await beginRecording()
+      await runAfterQuestionAudio()
     }
 
     await activeAudio.play()
@@ -308,13 +632,13 @@ async function playQuestionAudio(manual) {
       needsManualPlay.value = true
       return false
     }
-    await beginRecording()
+    await runAfterQuestionAudio()
     return false
   }
 }
 
 async function beginRecording() {
-  if (!currentQuestionData.value || isRecording.value || isPlaying.value || isFinished.value) return
+  if (!currentQuestionData.value || isRecording.value || isPlaying.value || isFinished.value || isPreparing.value || isInstructionActive.value) return
   await startRecording()
 }
 
@@ -355,6 +679,8 @@ async function startRecording() {
       await advanceToNextQuestion()
     }
 
+    const responseTime = currentQuestionData.value?.response_time || 30
+    examStore.timeRemaining = responseTime
     mediaRecorder.value.start()
     examStore.startRecording()
     examStore.startTimer()
@@ -399,6 +725,7 @@ function cleanupAudio() {
     activeAudioUrl = null
   }
   isPlaying.value = false
+  audioPhase.value = ''
 }
 
 function cleanupImage() {
@@ -428,7 +755,7 @@ function startAudioMeter(stream) {
       sum += value * value
     }
     const rms = Math.sqrt(sum / analyserData.length)
-    audioLevel.value = Math.min(1, Math.max(rms * 3.2, audioLevel.value * 0.7))
+    audioLevel.value = Math.min(1, Math.max(rms * 9.2, audioLevel.value * 0.7))
     meterAnimationId = requestAnimationFrame(updateLevel)
   }
 
@@ -474,6 +801,60 @@ function returnToStart() {
     radial-gradient(circle at 80% 85%, rgba(16, 185, 129, 0.1), transparent 40%);
   pointer-events: none;
   z-index: 0;
+}
+
+.instruction-overlay {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background:
+    radial-gradient(circle at 18% 20%, rgba(59, 130, 246, 0.18), transparent 55%),
+    radial-gradient(circle at 80% 75%, rgba(249, 115, 22, 0.2), transparent 55%),
+    linear-gradient(135deg, rgba(255, 255, 255, 0.96), rgba(248, 250, 252, 0.95));
+  backdrop-filter: blur(6px);
+  z-index: 5;
+  opacity: 1;
+  transition: opacity 0.45s ease, transform 0.45s ease;
+}
+
+.instruction-overlay.fade-out {
+  opacity: 0;
+  transform: scale(0.98);
+  pointer-events: none;
+}
+
+.instruction-panel {
+  background: rgba(255, 255, 255, 0.94);
+  border-radius: 28px;
+  padding: 48px 52px;
+  text-align: center;
+  max-width: 720px;
+  margin: 24px;
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  box-shadow: 0 30px 90px rgba(15, 23, 42, 0.18);
+  animation: floatIn 0.6s ease;
+}
+
+.instruction-tag {
+  font-size: 12px;
+  letter-spacing: 0.3em;
+  text-transform: uppercase;
+  color: #1d4ed8;
+  font-weight: 700;
+}
+
+.instruction-panel h2 {
+  font-family: 'Fraunces', serif;
+  font-size: 32px;
+  margin: 16px 0 14px;
+  color: #0f172a;
+}
+
+.instruction-panel p {
+  color: #475569;
+  font-size: 16px;
+  line-height: 1.7;
 }
 
 .exam-topbar {
@@ -729,80 +1110,120 @@ function returnToStart() {
   color: #1e3a8a;
 }
 
-.voice-orb {
+.voice-waves {
+  width: 220px;
+  height: 72px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px 4px;
   position: relative;
-  width: 84px;
-  height: 84px;
-  display: grid;
-  place-items: center;
-  background: #0f172a;
-  border-radius: 50%;
-  box-shadow: 0 0 0 12px rgba(15, 23, 42, 0.35);
+  border-radius: 999px;
+  overflow: hidden;
 }
 
-.orb-core {
+.voice-waves::before {
+  content: '';
   position: absolute;
-  width: 40px;
-  height: 40px;
-  background: radial-gradient(circle at 30% 30%, #e2e8f0, #94a3b8 55%, #64748b 100%);
-  border-radius: 50%;
-  opacity: 0.25;
-  transition: opacity 0.2s ease, transform 0.2s ease;
+  inset: 10% 6%;
+  border-radius: 999px;
+  background:
+    radial-gradient(circle at 10% 50%, rgba(56, 189, 248, 0.15), transparent 60%),
+    radial-gradient(circle at 90% 50%, rgba(249, 115, 22, 0.12), transparent 60%),
+    linear-gradient(90deg, rgba(15, 23, 42, 0.08), rgba(15, 23, 42, 0.02), rgba(15, 23, 42, 0.08));
+  filter: blur(6px);
+  opacity: 0.9;
 }
 
-.orb-ring {
+.voice-waves::after {
+  content: '';
   position: absolute;
-  width: 70px;
-  height: 70px;
-  border-radius: 50%;
-  border: 2px solid rgba(148, 163, 184, 0.55);
-  transform: scale(var(--orb-scale));
-  transition: border-color 0.2s ease, transform 0.08s ease-out, box-shadow 0.2s ease;
+  inset: 18% 12%;
+  border-radius: 999px;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  opacity: 0.6;
 }
 
-.orb-ring.ring-2 {
-  width: 86px;
-  height: 86px;
-  border-color: rgba(148, 163, 184, 0.25);
-  transform: scale(calc(var(--orb-scale) * 1.12));
+.wave-svg {
+  width: 100%;
+  height: 100%;
+  transform-origin: center;
+  transform: scaleY(var(--wave-scale));
+  transition: transform 0.08s ease-out, filter 0.2s ease;
+  filter: drop-shadow(0 0 var(--wave-glow) rgba(59, 130, 246, 0.4));
+  position: relative;
+  z-index: 1;
 }
 
-.orb-icon {
-  width: 26px;
-  height: 26px;
-  color: rgba(226, 232, 240, 0.75);
+.wave-base {
+  fill: none;
+  stroke: rgba(148, 163, 184, 0.45);
+  stroke-width: 1.2;
+  opacity: 0.5;
 }
 
-.voice-visual.active .orb-core {
-  opacity: 0.85;
-  animation: morph 2.6s ease-in-out infinite;
-  background: radial-gradient(circle at 30% 30%, #dbeafe, #60a5fa 60%, #1d4ed8 100%);
-  box-shadow: 0 0 var(--orb-glow) rgba(59, 130, 246, 0.45);
+.wave {
+  fill: none;
+  stroke: url(#waveGradient);
+  stroke-width: 2.4;
+  stroke-linecap: round;
+  opacity: 0.9;
+  filter: url(#waveGlow);
+  transform-origin: center;
+  animation: waveFloat 3.6s ease-in-out infinite;
 }
 
-.voice-visual.active .orb-ring {
-  border-color: rgba(59, 130, 246, 0.75);
-  box-shadow: 0 0 var(--orb-glow) rgba(59, 130, 246, 0.35);
+.wave-2 {
+  stroke-width: 2.1;
+  opacity: 0.7;
+  animation-duration: 4.2s;
 }
 
-.voice-visual.active .orb-ring.ring-2 {
-  border-color: rgba(59, 130, 246, 0.35);
+.wave-3 {
+  stroke-width: 1.8;
+  opacity: 0.5;
+  animation-duration: 5s;
 }
 
-.voice-visual.active .orb-icon {
-  color: #ffffff;
+.wave-4 {
+  stroke-width: 1.6;
+  opacity: 0.35;
+  animation-duration: 5.6s;
+}
+
+.wave-5 {
+  stroke: url(#waveAccent);
+  stroke-width: 1.4;
+  opacity: 0.55;
+  stroke-dasharray: 10 16;
+  animation: waveFloat 4.8s ease-in-out infinite, waveDash 6s linear infinite;
+}
+
+.wave-6 {
+  stroke: rgba(224, 231, 255, 0.75);
+  stroke-width: 1.1;
+  opacity: 0.5;
+  stroke-dasharray: 4 10;
+  animation: waveFloat 6.4s ease-in-out infinite, waveDash 7.4s linear infinite reverse;
+}
+
+.voice-visual.active .wave-svg {
+  filter: drop-shadow(0 0 var(--wave-glow) rgba(99, 102, 241, 0.55));
+}
+
+@keyframes waveFloat {
+  0%, 100% { transform: translateX(0); }
+  50% { transform: translateX(-18px); }
+}
+
+@keyframes waveDash {
+  to { stroke-dashoffset: -120; }
 }
 
 .auto-note {
   margin-top: 20px;
   color: #64748b;
   font-weight: 600;
-}
-
-@keyframes morph {
-  0% { border-radius: 50% 60% 40% 50% / 55% 45% 55% 45%; transform: scale(1); }
-  50% { border-radius: 55% 45% 60% 40% / 45% 55% 45% 55%; transform: scale(1.05); }
-  100% { border-radius: 50% 60% 40% 50% / 55% 45% 55% 45%; transform: scale(1); }
 }
 
 .info-card h3 {
@@ -947,6 +1368,19 @@ function returnToStart() {
 
   .complete-content {
     padding: 40px 28px;
+  }
+
+  .instruction-panel {
+    padding: 32px 24px;
+  }
+
+  .instruction-panel h2 {
+    font-size: 26px;
+  }
+
+  .voice-waves {
+    width: 170px;
+    height: 60px;
   }
 }
 </style>

@@ -57,7 +57,16 @@
                 </span>
               </td>
               <td>
-                <button class="action-btn" @click="viewAttemptDetails(attempt)">View Details</button>
+                <div class="attempt-actions">
+                  <button class="action-btn" @click="viewAttemptDetails(attempt)">View Details</button>
+                  <button
+                    class="danger-btn"
+                    :disabled="attempt.isDeleting"
+                    @click="deleteAttempt(attempt)"
+                  >
+                    {{ attempt.isDeleting ? 'Deleting...' : 'Delete' }}
+                  </button>
+                </div>
               </td>
             </tr>
           </tbody>
@@ -162,7 +171,13 @@
         <p>No recordings available yet</p>
       </div>
       <div v-else class="recordings-list">
-        <div v-for="attempt in recordingsByAttempt" :key="attempt.attemptId" class="recording-group">
+        <div
+          v-for="attempt in recordingsByAttempt"
+          :key="attempt.attemptId"
+          class="recording-group"
+          :id="`recording-group-${attempt.attemptId}`"
+          :class="{ highlight: selectedAttemptId === attempt.attemptId }"
+        >
           <div class="group-header">
             <div>
               <h3>{{ attempt.studentName }}</h3>
@@ -190,6 +205,13 @@
                   {{ recording.isLoading ? 'Loading...' : 'Load Audio' }}
                 </button>
                 <audio v-else controls :src="recording.audioUrl"></audio>
+                <button
+                  class="delete-recording-btn"
+                  :disabled="recording.isDeleting"
+                  @click="deleteRecording(recording)"
+                >
+                  {{ recording.isDeleting ? 'Deleting...' : 'Delete' }}
+                </button>
               </div>
             </div>
           </div>
@@ -223,7 +245,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 
 const activeTab = ref('Attempts')
@@ -235,6 +257,7 @@ const recordings = ref([])
 const addingQuestion = ref(false)
 const audioInput = ref(null)
 const imageInput = ref(null)
+const selectedAttemptId = ref(null)
 
 const newQuestion = ref({
   part: '',
@@ -291,7 +314,10 @@ function onImageSelected(event) {
 async function loadAttempts() {
   try {
     const data = await invoke('get_attempts')
-    attempts.value = data || []
+    attempts.value = (data || []).map((attempt) => ({
+      ...attempt,
+      isDeleting: false
+    }))
   } catch (error) {
     console.error('Failed to load attempts:', error)
   }
@@ -313,7 +339,8 @@ async function loadRecordings() {
     recordings.value = (data || []).map((recording) => ({
       ...recording,
       audioUrl: '',
-      isLoading: false
+      isLoading: false,
+      isDeleting: false
     }))
   } catch (error) {
     console.error('Failed to load recordings:', error)
@@ -402,6 +429,27 @@ async function loadRecordingAudio(recording) {
   }
 }
 
+async function deleteRecording(recording) {
+  if (recording.isDeleting) return
+  const confirmDelete = confirm('Delete this recording? This will remove the audio file and cannot be undone.')
+  if (!confirmDelete) return
+  recording.isDeleting = true
+  try {
+    await invoke('delete_response', {
+      responseId: recording.id
+    })
+    if (recording.audioUrl) {
+      URL.revokeObjectURL(recording.audioUrl)
+    }
+    recordings.value = recordings.value.filter(item => item.id !== recording.id)
+  } catch (error) {
+    console.error('Failed to delete recording:', error)
+    alert('Error deleting recording: ' + (error?.message || String(error)))
+  } finally {
+    recording.isDeleting = false
+  }
+}
+
 function revokeRecordingUrls() {
   recordings.value.forEach((recording) => {
     if (recording.audioUrl) {
@@ -450,8 +498,40 @@ function formatDate(dateString) {
   return date.toLocaleString()
 }
 
-function viewAttemptDetails(attempt) {
-  alert(`Viewing details for ${attempt.student_name}\n\nStarted: ${formatDate(attempt.started_at)}\nFinished: ${attempt.finished_at ? formatDate(attempt.finished_at) : 'Not finished'}`)
+async function viewAttemptDetails(attempt) {
+  selectedAttemptId.value = attempt.id
+  activeTab.value = 'Recordings'
+  await nextTick()
+  scrollToAttemptRecordings(attempt.id)
+}
+
+function scrollToAttemptRecordings(attemptId) {
+  const target = document.getElementById(`recording-group-${attemptId}`)
+  if (target) {
+    target.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
+}
+
+async function deleteAttempt(attempt) {
+  if (attempt.isDeleting) return
+  const confirmDelete = confirm('Delete this attempt and all related recordings? This cannot be undone.')
+  if (!confirmDelete) return
+  attempt.isDeleting = true
+  try {
+    await invoke('delete_attempt', {
+      attemptId: attempt.id
+    })
+    attempts.value = attempts.value.filter(item => item.id !== attempt.id)
+    await loadRecordings()
+    if (selectedAttemptId.value === attempt.id) {
+      selectedAttemptId.value = null
+    }
+  } catch (error) {
+    console.error('Failed to delete attempt:', error)
+    alert('Error deleting attempt: ' + (error?.message || String(error)))
+  } finally {
+    attempt.isDeleting = false
+  }
 }
 
 async function deleteQuestion(questionId) {
@@ -486,6 +566,14 @@ watch(() => newQuestion.value.part, (value) => {
     if (imageInput.value) {
       imageInput.value.value = ''
     }
+  }
+})
+
+watch(recordingsByAttempt, (groups) => {
+  if (!selectedAttemptId.value || activeTab.value !== 'Recordings') return
+  const exists = groups.some(group => group.attemptId === selectedAttemptId.value)
+  if (exists) {
+    nextTick(() => scrollToAttemptRecordings(selectedAttemptId.value))
   }
 })
 </script>
@@ -653,6 +741,34 @@ watch(() => newQuestion.value.part, (value) => {
   transform: translateY(-1px);
 }
 
+.attempt-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.danger-btn {
+  background: #ef4444;
+  color: white;
+  padding: 0.5rem 1rem;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 0.875rem;
+  font-weight: 600;
+  transition: transform 0.2s ease, background 0.2s ease;
+}
+
+.danger-btn:hover:not(:disabled) {
+  background: #dc2626;
+  transform: translateY(-1px);
+}
+
+.danger-btn:disabled {
+  background: #fca5a5;
+  cursor: not-allowed;
+}
+
 .empty-state {
   text-align: center;
   padding: 2rem;
@@ -810,6 +926,11 @@ watch(() => newQuestion.value.part, (value) => {
   background: #f8fafc;
 }
 
+.recording-group.highlight {
+  border-color: #2563eb;
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.2);
+}
+
 .group-header h3 {
   font-family: 'Fraunces', serif;
   margin: 0 0 4px;
@@ -877,6 +998,26 @@ watch(() => newQuestion.value.part, (value) => {
 
 .load-btn:disabled {
   background: #94a3b8;
+  cursor: not-allowed;
+}
+
+.delete-recording-btn {
+  background: #ef4444;
+  color: white;
+  border: none;
+  padding: 0.5rem 0.9rem;
+  border-radius: 10px;
+  cursor: pointer;
+  font-weight: 600;
+  transition: background 0.2s ease;
+}
+
+.delete-recording-btn:hover:not(:disabled) {
+  background: #dc2626;
+}
+
+.delete-recording-btn:disabled {
+  background: #fca5a5;
   cursor: not-allowed;
 }
 

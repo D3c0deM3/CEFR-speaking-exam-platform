@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, params, OptionalExtension, ToSql};
 use tauri::{AppHandle, Manager};
 use std::fs;
 
@@ -331,19 +331,43 @@ pub async fn get_audio_file(
 ) -> Result<Vec<u8>, String> {
     let app_dir = app_handle.path().app_data_dir()
         .map_err(|e| format!("Failed to get app data directory: {}", e))?;
-    
-    let audio_file_path = app_dir.join("audio").join(&filename);
-    println!("Reading audio file from: {:?}", audio_file_path);
-    
-    let data = fs::read(&audio_file_path)
-        .map_err(|e| {
-            let err_msg = format!("Failed to read audio file {}: {}", filename, e);
-            println!("Error: {}", err_msg);
-            err_msg
-        })?;
-    
-    println!("Audio file read successfully: {} bytes", data.len());
-    Ok(data)
+
+    let mut candidates = Vec::new();
+    candidates.push(app_dir.join("audio").join(&filename));
+
+    if let Ok(resource_dir) = app_handle.path().resource_dir() {
+        candidates.push(resource_dir.join(&filename));
+        candidates.push(resource_dir.join("audio").join(&filename));
+        candidates.push(resource_dir.join("instruction_sounds").join(&filename));
+        candidates.push(resource_dir.join("_up_").join("instruction_sounds").join(&filename));
+        candidates.push(resource_dir.join("_up_").join("src").join("instruction_sounds").join(&filename));
+    }
+
+    let dev_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("src")
+        .join("instruction_sounds")
+        .join(&filename);
+    candidates.push(dev_path);
+
+    for path in candidates {
+        if !path.exists() {
+            continue;
+        }
+        println!("Reading audio file from: {:?}", path);
+        let data = fs::read(&path)
+            .map_err(|e| {
+                let err_msg = format!("Failed to read audio file {}: {}", filename, e);
+                println!("Error: {}", err_msg);
+                err_msg
+            })?;
+        println!("Audio file read successfully: {} bytes", data.len());
+        return Ok(data);
+    }
+
+    let err_msg = format!("Failed to read audio file {}: file not found", filename);
+    println!("Error: {}", err_msg);
+    Err(err_msg)
 }
 
 #[tauri::command]
@@ -554,4 +578,107 @@ pub async fn get_response_audio(
         })?;
 
     Ok(data)
+}
+
+#[tauri::command]
+pub async fn delete_response(
+    app_handle: AppHandle,
+    response_id: i64,
+) -> Result<(), String> {
+    let conn = init_db(&app_handle)?;
+
+    let audio_path: Option<String> = conn
+        .query_row(
+            "SELECT audio_path FROM responses WHERE id = ?",
+            params![response_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+
+    if let Some(path) = audio_path {
+        let remove_result = fs::remove_file(&path);
+        if let Err(error) = remove_result {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                return Err(format!("Failed to delete audio file: {}", error));
+            }
+        }
+    }
+
+    conn.execute(
+        "DELETE FROM ratings WHERE response_id = ?",
+        params![response_id],
+    )
+    .map_err(|e| e.to_string())?;
+
+    conn.execute(
+        "DELETE FROM responses WHERE id = ?",
+        params![response_id],
+    )
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn delete_attempt(
+    app_handle: AppHandle,
+    attempt_id: i64,
+) -> Result<(), String> {
+    let conn = init_db(&app_handle)?;
+
+    let mut stmt = conn
+        .prepare("SELECT id, audio_path FROM responses WHERE attempt_id = ?")
+        .map_err(|e| e.to_string())?;
+
+    let response_rows = stmt
+        .query_map(params![attempt_id], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|e| e.to_string())?;
+
+    let mut response_ids = Vec::new();
+    for row in response_rows {
+        let (response_id, audio_path) = row.map_err(|e| e.to_string())?;
+        response_ids.push(response_id);
+        if !audio_path.is_empty() {
+            let remove_result = fs::remove_file(&audio_path);
+            if let Err(error) = remove_result {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    return Err(format!("Failed to delete audio file: {}", error));
+                }
+            }
+        }
+    }
+
+    if !response_ids.is_empty() {
+        let placeholders = response_ids
+            .iter()
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut params: Vec<&dyn rusqlite::ToSql> = Vec::new();
+        for id in &response_ids {
+            params.push(id);
+        }
+        conn.execute(
+            &format!("DELETE FROM ratings WHERE response_id IN ({})", placeholders),
+            params.as_slice(),
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    conn.execute(
+        "DELETE FROM responses WHERE attempt_id = ?",
+        params![attempt_id],
+    )
+    .map_err(|e| e.to_string())?;
+
+    conn.execute(
+        "DELETE FROM attempts WHERE id = ?",
+        params![attempt_id],
+    )
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
 }

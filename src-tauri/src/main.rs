@@ -21,7 +21,9 @@ fn main() {
             save_image_file,
             get_image_file,
             get_recordings,
-            get_response_audio
+            get_response_audio,
+            delete_response,
+            delete_attempt
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

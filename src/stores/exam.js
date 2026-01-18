@@ -15,10 +15,10 @@ export const useExamStore = defineStore('exam', () => {
   const timerInterval = ref(null)
 
   const sections = [
-    { part: 1, subPart: 1, count: 2, label: '1.1' },
-    { part: 1, subPart: 2, count: 2, label: '1.2' },
+    { part: 1, subPart: 1, count: 3, label: '1.1' },
+    { part: 1, subPart: 2, count: 3, label: '1.2' },
     { part: 2, subPart: 0, count: 1, label: '2' },
-    { part: 3, subPart: 0, count: 5, label: '3' }
+    { part: 3, subPart: 0, count: 1, label: '3' }
   ]
   
   // Actions

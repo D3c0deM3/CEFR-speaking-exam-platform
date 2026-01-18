@@ -3,7 +3,7 @@
     <div class="entry-shell">
       <div class="entry-info">
         <span class="eyebrow">CEFR Speaking</span>
-        <h1>IELTS Speaking Mock Test</h1>
+        <h1>CEFR Speaking Mock Test</h1>
         <p class="subtitle">Enter your full name to begin. The test runs automatically once you start.</p>
         <div class="instruction-list">
           <div class="instruction-item">
