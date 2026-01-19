@@ -365,7 +365,9 @@ async function addQuestion() {
     let imagePath = null
 
     if (newQuestion.value.audioData) {
-      const filename = `part${part}_${subPart || 0}_${Date.now()}.wav`
+      const extension = getFileExtension(newQuestion.value.audioData.name, 'wav')
+      const uniqueSuffix = `${Date.now()}_${Math.random().toString(16).slice(2, 8)}`
+      const filename = `part${part}_${subPart || 0}_${uniqueSuffix}.${extension}`
 
       const arrayBuffer = await newQuestion.value.audioData.arrayBuffer()
       const audioBytes = Array.from(new Uint8Array(arrayBuffer))
@@ -379,8 +381,9 @@ async function addQuestion() {
     }
 
     if (newQuestion.value.imageData) {
-      const extension = getFileExtension(newQuestion.value.imageData.name)
-      const filename = `part${part}_${subPart || 0}_${Date.now()}.${extension}`
+      const extension = getFileExtension(newQuestion.value.imageData.name, 'png')
+      const uniqueSuffix = `${Date.now()}_${Math.random().toString(16).slice(2, 8)}`
+      const filename = `part${part}_${subPart || 0}_${uniqueSuffix}.${extension}`
       const arrayBuffer = await newQuestion.value.imageData.arrayBuffer()
       const imageBytes = Array.from(new Uint8Array(arrayBuffer))
 
@@ -482,9 +485,9 @@ function parsePartSelection(partValue) {
   return { part: Number(partValue), subPart: 0 }
 }
 
-function getFileExtension(filename) {
+function getFileExtension(filename, fallback = 'png') {
   const segments = filename.split('.')
-  return segments.length > 1 ? segments.pop().toLowerCase() : 'png'
+  return segments.length > 1 ? segments.pop().toLowerCase() : fallback
 }
 
 function formatPart(part, subPart) {

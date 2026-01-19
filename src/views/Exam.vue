@@ -13,6 +13,20 @@
         <p>{{ instructionMessage }}</p>
       </div>
     </div>
+    <div
+      v-if="isQuickPrepActive"
+      class="quick-prep-overlay"
+      :class="{ 'fade-out': isQuickPrepFading }"
+      aria-live="polite"
+    >
+      <div class="quick-prep-count">{{ quickPrepCount }}</div>
+      <div
+        v-if="currentQuestionData?.text"
+        class="quick-prep-question"
+      >
+        {{ currentQuestionData.text }}
+      </div>
+    </div>
     <header class="exam-topbar">
       <div class="brand">
         <span class="brand-title">CEFR Speaking</span>
@@ -42,7 +56,11 @@
           <span class="info-pill" v-if="hasQuestionImage">Image Prompt</span>
         </div>
 
-        <div v-if="currentQuestionData?.text" class="question-text">
+        <div
+          v-if="currentQuestionData?.text"
+          class="question-text"
+          :class="{ 'question-text-hidden': isQuickPrepActive }"
+        >
           {{ currentQuestionData.text }}
         </div>
 
@@ -124,7 +142,7 @@
             {{ isPreparing ? 'Preparation time' : isRecording ? 'Recording your response' : 'Ready to record' }}
           </span>
         </div>
-        <div class="auto-note" v-if="!isPlaying && !isRecording && !isPreparing">
+        <div class="auto-note" v-if="!isPlaying && !isRecording && !isPreparing && !isQuickPrepActive">
           Recording starts after the bell.
         </div>
       </section>
@@ -199,6 +217,10 @@ const hasPlayedEndAudio = ref(false)
 const flowLock = ref(false)
 const audioPhase = ref('')
 const lastSectionKey = ref('')
+const isQuickPrepActive = ref(false)
+const isQuickPrepFading = ref(false)
+const quickPrepCount = ref(5)
+const tickPlayedForQuestionId = ref(null)
 
 let recordingStartTime = 0
 let activeAudio = null
@@ -211,6 +233,9 @@ let analyserNode = null
 let analyserData = null
 let analyserContext = null
 let pendingAfterQuestionAudio = null
+let quickPrepToken = 0
+let tickAudio = null
+let tickAudioUrl = null
 
 // Computed properties
 const currentPart = computed(() => examStore.currentPart)
@@ -227,6 +252,9 @@ const isFinished = computed(() => examStore.isFinished)
 
 const PREP_SECONDS = 60
 const INSTRUCTION_FADE_MS = 450
+const QUICK_PREP_SECONDS = 5
+const QUICK_PREP_FADE_MS = 350
+const POST_RECORD_DELAY_MS = 2000
 
 const AUDIO_FILES = {
   intro: 'intro.mp3',
@@ -236,7 +264,8 @@ const AUDIO_FILES = {
   part2: 'part_2.mp3',
   part3: 'part_3.mp3',
   bell: 'bell_sound.mp3',
-  end: 'end.mp3'
+  end: 'end.mp3',
+  ticking: 'time_ticking.mp3'
 }
 
 const SECTION_INSTRUCTIONS = {
@@ -272,6 +301,8 @@ const needsPreparation = computed(() => {
   return (currentPart.value === 2 || currentPart.value === 3) && currentQuestion.value === 0
 })
 
+const needsQuickPrep = computed(() => currentPart.value === 1 && (currentSubPart.value === 1 || currentSubPart.value === 2))
+
 const hasQuestionAudio = computed(() => {
   const audioPath = currentQuestionData.value?.audio_path
   return typeof audioPath === 'string' && audioPath.trim() !== ''
@@ -283,6 +314,7 @@ const hasQuestionImage = computed(() => {
 })
 
 const statusLabel = computed(() => {
+  if (isQuickPrepActive.value) return 'Get ready'
   if (isPreparing.value) return 'Preparation time'
   if (isPlaying.value) return audioPhase.value === 'bell' ? 'Starting recording' : 'Listening to question'
   if (isRecording.value) return 'Recording response'
@@ -309,10 +341,12 @@ onMounted(async () => {
 onUnmounted(() => {
   isUnmounting = true
   cleanupAudio()
+  cleanupTickAudio()
   cleanupImage()
   stopRecording()
   examStore.stopTimer()
   stopAudioMeter()
+  cancelQuickPrep()
 })
 
 watch(currentQuestionData, async (value) => {
@@ -321,6 +355,13 @@ watch(currentQuestionData, async (value) => {
 }, { immediate: true })
 
 watch(timeRemaining, async (value) => {
+  if (value === 4 && isRecording.value && !isPreparing.value) {
+    const questionId = currentQuestionData.value?.id
+    if (questionId && tickPlayedForQuestionId.value !== questionId) {
+      tickPlayedForQuestionId.value = questionId
+      playTickAudio()
+    }
+  }
   if (value !== 0) return
   if (isPreparing.value) {
     await completePreparation()
@@ -457,8 +498,15 @@ async function playSystemAudio(filename, phase) {
   }
 }
 
-async function playBellAndRecord() {
+async function playBellAndRecord({ awaitBell = true } = {}) {
   if (isUnmounting || isFinished.value) return
+  if (!awaitBell) {
+    await beginRecording()
+    if (isUnmounting || isFinished.value) return
+    void playSystemAudio(AUDIO_FILES.bell, 'bell')
+    return
+  }
+
   await playSystemAudio(AUDIO_FILES.bell, 'bell')
   if (isUnmounting || isFinished.value) return
   await beginRecording()
@@ -487,14 +535,44 @@ async function runAfterQuestionAudio() {
   }
 }
 
+function cancelQuickPrep() {
+  quickPrepToken += 1
+  isQuickPrepActive.value = false
+  isQuickPrepFading.value = false
+}
+
 function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+async function runQuickPrepCountdown() {
+  if (isUnmounting) return
+  quickPrepToken += 1
+  const token = quickPrepToken
+  isQuickPrepActive.value = true
+  isQuickPrepFading.value = false
+  quickPrepCount.value = QUICK_PREP_SECONDS
+  examStore.stopTimer()
+
+  for (let remaining = QUICK_PREP_SECONDS; remaining > 0; remaining -= 1) {
+    if (isUnmounting || token !== quickPrepToken) return
+    quickPrepCount.value = remaining
+    await delay(1000)
+  }
+
+  if (isUnmounting || token !== quickPrepToken) return
+  isQuickPrepFading.value = true
+  await delay(QUICK_PREP_FADE_MS)
+  isQuickPrepActive.value = false
+  isQuickPrepFading.value = false
 }
 
 async function startQuestionFlow() {
   needsManualPlay.value = false
   isPreparing.value = false
   pendingAfterQuestionAudio = null
+  cancelQuickPrep()
+  tickPlayedForQuestionId.value = null
   cleanupAudio()
   cleanupImage()
 
@@ -505,6 +583,11 @@ async function startQuestionFlow() {
   if (needsPreparation.value) {
     pendingAfterQuestionAudio = async () => {
       await startPreparation()
+    }
+  } else if (needsQuickPrep.value) {
+    pendingAfterQuestionAudio = async () => {
+      await runQuickPrepCountdown()
+      await playBellAndRecord({ awaitBell: false })
     }
   } else {
     pendingAfterQuestionAudio = async () => {
@@ -637,6 +720,40 @@ async function playQuestionAudio(manual) {
   }
 }
 
+function cleanupTickAudio() {
+  if (tickAudio) {
+    tickAudio.pause()
+    tickAudio.src = ''
+    tickAudio = null
+  }
+  if (tickAudioUrl) {
+    URL.revokeObjectURL(tickAudioUrl)
+    tickAudioUrl = null
+  }
+}
+
+async function playTickAudio() {
+  if (isUnmounting) return
+  try {
+    const audioResult = await loadAudioData(AUDIO_FILES.ticking)
+    if (!audioResult || !audioResult.data || audioResult.data.length === 0) {
+      throw new Error('No audio data received from backend')
+    }
+    const audioArray = new Uint8Array(audioResult.data)
+    const audioBlob = new Blob([audioArray], { type: resolveAudioType(audioResult.filename) })
+    const audioUrl = URL.createObjectURL(audioBlob)
+    cleanupTickAudio()
+    tickAudioUrl = audioUrl
+    tickAudio = new Audio(audioUrl)
+    tickAudio.onended = () => cleanupTickAudio()
+    tickAudio.onerror = () => cleanupTickAudio()
+    await tickAudio.play()
+  } catch (error) {
+    cleanupTickAudio()
+    console.warn('Failed to play ticking audio:', error)
+  }
+}
+
 async function beginRecording() {
   if (!currentQuestionData.value || isRecording.value || isPlaying.value || isFinished.value || isPreparing.value || isInstructionActive.value) return
   await startRecording()
@@ -675,6 +792,8 @@ async function startRecording() {
       await examStore.saveResponse(audioBlob, duration)
       stream.getTracks().forEach(track => track.stop())
       activeStream = null
+      if (isUnmounting) return
+      await delay(POST_RECORD_DELAY_MS)
       if (isUnmounting) return
       await advanceToNextQuestion()
     }
@@ -822,6 +941,50 @@ function returnToStart() {
   opacity: 0;
   transform: scale(0.98);
   pointer-events: none;
+}
+
+.quick-prep-overlay {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 24px;
+  text-align: center;
+  background:
+    radial-gradient(circle at 50% 40%, rgba(249, 115, 22, 0.25), transparent 55%),
+    radial-gradient(circle at 20% 80%, rgba(59, 130, 246, 0.2), transparent 50%),
+    rgba(15, 23, 42, 0.65);
+  z-index: 6;
+  backdrop-filter: blur(6px);
+  opacity: 1;
+  transition: opacity 0.35s ease, transform 0.35s ease;
+}
+
+.quick-prep-overlay.fade-out {
+  opacity: 0;
+  transform: scale(0.98);
+  pointer-events: none;
+}
+
+.quick-prep-count {
+  font-family: 'Space Grotesk', sans-serif;
+  font-size: clamp(120px, 22vw, 240px);
+  font-weight: 700;
+  color: #f8fafc;
+  letter-spacing: 0.08em;
+  text-shadow: 0 18px 40px rgba(15, 23, 42, 0.4);
+}
+
+.quick-prep-question {
+  max-width: min(720px, 88vw);
+  font-family: 'Space Grotesk', sans-serif;
+  font-size: clamp(20px, 3.2vw, 32px);
+  font-weight: 600;
+  color: #f8fafc;
+  text-shadow: 0 16px 40px rgba(15, 23, 42, 0.5);
 }
 
 .instruction-panel {
@@ -1004,6 +1167,11 @@ function returnToStart() {
   color: #0f172a;
   margin-bottom: 18px;
   line-height: 1.5;
+  transition: opacity 0.2s ease;
+}
+
+.question-text-hidden {
+  opacity: 0;
 }
 
 .status-pill {

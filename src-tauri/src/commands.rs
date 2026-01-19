@@ -1,7 +1,9 @@
 use serde::{Deserialize, Serialize};
 use rusqlite::{Connection, params, OptionalExtension, ToSql};
 use tauri::{AppHandle, Manager};
+use rand::{distributions::Alphanumeric, Rng};
 use std::fs;
+use std::path::Path;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Question {
@@ -128,6 +130,40 @@ fn ensure_column(conn: &Connection, table: &str, column: &str, column_def: &str)
     ).map_err(|e| e.to_string())?;
 
     Ok(())
+}
+
+fn unique_filename(dir: &Path, filename: &str) -> Result<String, String> {
+    let base_name = Path::new(filename)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "Invalid filename".to_string())?
+        .to_string();
+
+    if !dir.join(&base_name).exists() {
+        return Ok(base_name);
+    }
+
+    let path = Path::new(&base_name);
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("file");
+    let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
+
+    for _ in 0..50 {
+        let suffix: String = rand::thread_rng()
+            .sample_iter(&Alphanumeric)
+            .take(6)
+            .map(char::from)
+            .collect();
+        let candidate = if ext.is_empty() {
+            format!("{}_{}", stem, suffix)
+        } else {
+            format!("{}_{}.{}", stem, suffix, ext)
+        };
+        if !dir.join(&candidate).exists() {
+            return Ok(candidate);
+        }
+    }
+
+    Err("Failed to generate unique filename".to_string())
 }
 
 #[tauri::command]
@@ -309,10 +345,12 @@ pub async fn save_audio_file(
     
     fs::create_dir_all(&app_dir).map_err(|e| e.to_string())?;
     
-    let audio_file_path = app_dir.join("audio").join(&filename);
+    let audio_dir = app_dir.join("audio");
+    fs::create_dir_all(&audio_dir).map_err(|e| e.to_string())?;
+
+    let safe_filename = unique_filename(&audio_dir, &filename)?;
+    let audio_file_path = audio_dir.join(&safe_filename);
     println!("Saving audio file to: {:?}, size: {} bytes", audio_file_path, audio_data.len());
-    
-    fs::create_dir_all(audio_file_path.parent().unwrap()).map_err(|e| e.to_string())?;
     
     fs::write(&audio_file_path, &audio_data).map_err(|e| {
         let err_msg = format!("Failed to write audio file: {}", e);
@@ -320,8 +358,8 @@ pub async fn save_audio_file(
         err_msg
     })?;
     
-    println!("Audio file saved successfully: {}", filename);
-    Ok(filename)
+    println!("Audio file saved successfully: {}", safe_filename);
+    Ok(safe_filename)
 }
 
 #[tauri::command]
@@ -480,8 +518,11 @@ pub async fn save_image_file(
 
     fs::create_dir_all(&app_dir).map_err(|e| e.to_string())?;
 
-    let image_file_path = app_dir.join("images").join(&filename);
-    fs::create_dir_all(image_file_path.parent().unwrap()).map_err(|e| e.to_string())?;
+    let image_dir = app_dir.join("images");
+    fs::create_dir_all(&image_dir).map_err(|e| e.to_string())?;
+
+    let safe_filename = unique_filename(&image_dir, &filename)?;
+    let image_file_path = image_dir.join(&safe_filename);
 
     fs::write(&image_file_path, &image_data).map_err(|e| {
         let err_msg = format!("Failed to write image file: {}", e);
@@ -489,7 +530,7 @@ pub async fn save_image_file(
         err_msg
     })?;
 
-    Ok(filename)
+    Ok(safe_filename)
 }
 
 #[tauri::command]
