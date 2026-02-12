@@ -23,7 +23,11 @@ fn main() {
             get_recordings,
             get_response_audio,
             delete_response,
-            delete_attempt
+            delete_attempt,
+            get_telegram_chat_id,
+            set_telegram_chat_id,
+            get_telegram_chat_ids,
+            set_telegram_chat_ids
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

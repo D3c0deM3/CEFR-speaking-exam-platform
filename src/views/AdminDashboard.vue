@@ -19,6 +19,50 @@
       </button>
     </div>
 
+    <div class="telegram-settings-card">
+      <div class="telegram-settings-header">
+        <h2>Telegram Receiver</h2>
+        <p>Add Telegram chat IDs. Every new recording will be sent to all IDs in this list.</p>
+      </div>
+      <div class="telegram-settings-controls">
+        <input
+          v-model.trim="telegramChatIdInput"
+          type="text"
+          class="form-input"
+          placeholder="e.g. 764168975 or -1001234567890"
+          @keyup.enter="addTelegramChatId"
+        />
+        <button
+          class="icon-btn add-telegram-btn"
+          :disabled="savingTelegramChatIds"
+          title="Add chat ID"
+          aria-label="Add chat ID"
+          @click="addTelegramChatId"
+        >
+          +
+        </button>
+      </div>
+      <div v-if="telegramChatIds.length > 0" class="telegram-chat-list">
+        <div
+          v-for="chatId in telegramChatIds"
+          :key="chatId"
+          class="telegram-chat-chip"
+        >
+          <span>{{ chatId }}</span>
+          <button
+            class="icon-btn delete-telegram-btn"
+            :disabled="savingTelegramChatIds"
+            title="Remove chat ID"
+            aria-label="Remove chat ID"
+            @click="removeTelegramChatId(chatId)"
+          >
+            x
+          </button>
+        </div>
+      </div>
+      <p v-else class="telegram-empty">No chat IDs added yet.</p>
+    </div>
+
     <!-- Attempts Tab -->
     <div v-if="activeTab === 'Attempts'" class="tab-content">
       <div class="section-header">
@@ -93,7 +137,25 @@
             <label>Response Time (seconds)</label>
             <input v-model.number="newQuestion.response_time" type="number" class="form-input" />
           </div>
-          <div class="form-group form-span">
+          <div class="form-group" v-if="needsPack">
+            <label>Test Pack ID</label>
+            <input
+              v-model.trim="newQuestion.packId"
+              type="text"
+              class="form-input"
+              placeholder="e.g. Test 1"
+            />
+          </div>
+          <div class="form-group" v-if="needsPack">
+            <label>Order in Pack</label>
+            <input
+              v-model.number="newQuestion.packOrder"
+              type="number"
+              min="1"
+              class="form-input"
+            />
+          </div>
+          <div class="form-group form-span" v-if="showQuestionTextInput">
             <label>Question Text</label>
             <textarea
               v-model="newQuestion.text"
@@ -117,8 +179,8 @@
               </label>
             </div>
           </div>
-          <div class="form-group" v-if="newQuestion.part === '1.2'">
-            <label>Image File (Required for Part 1.2)</label>
+          <div class="form-group" v-if="showImageUpload">
+            <label>{{ imageLabel }}</label>
             <div class="file-input-wrapper">
               <input
                 ref="imageInput"
@@ -149,6 +211,8 @@
               <strong>{{ formatPart(question.part, question.sub_part) }}</strong>
               <span v-if="question.text" class="question-text">{{ question.text }}</span>
               <span>{{ question.response_time }}s</span>
+              <span v-if="question.pack_id" class="tag">Pack {{ question.pack_id }}</span>
+              <span v-if="question.pack_order" class="tag">Order {{ question.pack_order }}</span>
               <span v-if="question.audio_path" class="tag">Audio</span>
               <span v-if="question.image_path" class="tag">Image</span>
             </div>
@@ -255,6 +319,9 @@ const attempts = ref([])
 const questions = ref([])
 const recordings = ref([])
 const addingQuestion = ref(false)
+const telegramChatIdInput = ref('')
+const telegramChatIds = ref([])
+const savingTelegramChatIds = ref(false)
 const audioInput = ref(null)
 const imageInput = ref(null)
 const selectedAttemptId = ref(null)
@@ -263,6 +330,8 @@ const newQuestion = ref({
   part: '',
   response_time: 30,
   text: '',
+  packId: '',
+  packOrder: 1,
   audioFileName: '',
   audioData: null,
   imageFileName: '',
@@ -290,6 +359,17 @@ const recordingsByAttempt = computed(() => {
   })
   return Array.from(groups.values())
 })
+
+const needsPack = computed(() => newQuestion.value.part === '1.1' || newQuestion.value.part === '1.2')
+const showImageUpload = computed(() => ['1.2', '2', '3'].includes(newQuestion.value.part))
+const imageRequired = computed(() => newQuestion.value.part === '1.2' || newQuestion.value.part === '3')
+const imageLabel = computed(() => {
+  if (newQuestion.value.part === '1.2') return 'Image File (Required for Part 1.2)'
+  if (newQuestion.value.part === '3') return 'Image File (Required for Part 3)'
+  if (newQuestion.value.part === '2') return 'Image File (Optional)'
+  return 'Image File'
+})
+const showQuestionTextInput = computed(() => newQuestion.value.part !== '3')
 
 const totalAttempts = computed(() => attempts.value.length)
 const completedAttempts = computed(() => attempts.value.filter(a => a.finished_at).length)
@@ -347,20 +427,83 @@ async function loadRecordings() {
   }
 }
 
+async function loadTelegramChatIds() {
+  try {
+    const chatIds = await invoke('get_telegram_chat_ids')
+    telegramChatIds.value = Array.isArray(chatIds)
+      ? chatIds.map((chatId) => chatId.toString())
+      : []
+  } catch (error) {
+    console.error('Failed to load Telegram chat IDs:', error)
+  }
+}
+
+async function addTelegramChatId() {
+  const chatId = telegramChatIdInput.value.trim()
+  if (!chatId) {
+    alert('Please enter a Telegram chat ID')
+    return
+  }
+  if (telegramChatIds.value.includes(chatId)) {
+    alert('This Telegram chat ID is already in the list')
+    return
+  }
+
+  const nextChatIds = [...telegramChatIds.value, chatId]
+  const saved = await persistTelegramChatIds(nextChatIds)
+  if (saved) {
+    telegramChatIdInput.value = ''
+  }
+}
+
+async function removeTelegramChatId(chatIdToRemove) {
+  const nextChatIds = telegramChatIds.value.filter(chatId => chatId !== chatIdToRemove)
+  await persistTelegramChatIds(nextChatIds)
+}
+
+async function persistTelegramChatIds(nextChatIds) {
+  savingTelegramChatIds.value = true
+  try {
+    const savedChatIds = await invoke('set_telegram_chat_ids', { chatIds: nextChatIds })
+    telegramChatIds.value = Array.isArray(savedChatIds)
+      ? savedChatIds.map((chatId) => chatId.toString())
+      : nextChatIds
+    return true
+  } catch (error) {
+    console.error('Failed to save Telegram chat IDs:', error)
+    alert('Error saving Telegram chat IDs: ' + (error?.message || String(error)))
+    return false
+  } finally {
+    savingTelegramChatIds.value = false
+  }
+}
+
 async function addQuestion() {
   if (!newQuestion.value.part) {
     alert('Please select a part')
     return
   }
 
-  if (newQuestion.value.part === '1.2' && !newQuestion.value.imageData) {
-    alert('Please upload an image for Part 1.2')
+  if (imageRequired.value && !newQuestion.value.imageData) {
+    const partLabel = newQuestion.value.part === '3' ? 'Part 3' : 'Part 1.2'
+    alert(`Please upload an image for ${partLabel}`)
+    return
+  }
+
+  if (needsPack.value && !newQuestion.value.packId.trim()) {
+    alert('Please enter a test pack ID for Part 1.1 and Part 1.2')
+    return
+  }
+
+  if (needsPack.value && (!Number.isFinite(newQuestion.value.packOrder) || newQuestion.value.packOrder < 1)) {
+    alert('Please enter the order of this question in the test pack')
     return
   }
 
   addingQuestion.value = true
   try {
     const { part, subPart } = parsePartSelection(newQuestion.value.part)
+    const requiresPack = part === 1 && (subPart === 1 || subPart === 2)
     let audioPath = null
     let imagePath = null
 
@@ -395,13 +538,19 @@ async function addQuestion() {
       imagePath = savedFilename
     }
 
+    const questionText = newQuestion.value.part === '3' ? '' : (newQuestion.value.text?.trim() || '')
+    const packId = requiresPack ? newQuestion.value.packId.trim() : ''
+    const packOrder = requiresPack ? Number(newQuestion.value.packOrder || 0) : 0
+
     await invoke('add_question', {
       part: part,
       subPart: subPart || undefined,
       responseTime: newQuestion.value.response_time,
       audioPath: audioPath,
       imagePath: imagePath,
-      text: newQuestion.value.text?.trim() || ''
+      text: questionText,
+      packId: packId,
+      packOrder: packOrder
     })
 
     resetQuestionForm()
@@ -466,6 +615,8 @@ function resetQuestionForm() {
     part: '',
     response_time: 30,
     text: '',
+    packId: '',
+    packOrder: 1,
     audioFileName: '',
     audioData: null,
     imageFileName: '',
@@ -556,6 +707,7 @@ onMounted(() => {
   loadAttempts()
   loadQuestions()
   loadRecordings()
+  loadTelegramChatIds()
 })
 
 onUnmounted(() => {
@@ -563,12 +715,22 @@ onUnmounted(() => {
 })
 
 watch(() => newQuestion.value.part, (value) => {
-  if (value !== '1.2') {
+  const allowImage = ['1.2', '2', '3'].includes(value)
+  if (!allowImage) {
     newQuestion.value.imageFileName = ''
     newQuestion.value.imageData = null
     if (imageInput.value) {
       imageInput.value.value = ''
     }
+  }
+
+  if (value !== '1.1' && value !== '1.2') {
+    newQuestion.value.packId = ''
+    newQuestion.value.packOrder = 1
+  }
+
+  if (value === '3') {
+    newQuestion.value.text = ''
   }
 })
 
@@ -656,6 +818,110 @@ watch(recordingsByAttempt, (groups) => {
 .tab-btn:hover {
   background: #2563eb;
   color: white;
+}
+
+.telegram-settings-card {
+  margin-bottom: 24px;
+  padding: 20px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.95);
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  box-shadow: 0 16px 40px rgba(15, 23, 42, 0.08);
+}
+
+.telegram-settings-header h2 {
+  margin: 0;
+  font-size: 18px;
+  color: #0f172a;
+}
+
+.telegram-settings-header p {
+  margin: 8px 0 0;
+  color: #64748b;
+  font-size: 14px;
+}
+
+.telegram-settings-controls {
+  margin-top: 14px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+}
+
+.icon-btn {
+  border: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  cursor: pointer;
+  transition: transform 0.2s ease, background 0.2s ease;
+}
+
+.add-telegram-btn {
+  background: #0f766e;
+  color: white;
+  border-radius: 10px;
+  width: 44px;
+  height: 44px;
+  font-size: 28px;
+  line-height: 1;
+}
+
+.add-telegram-btn:hover:not(:disabled) {
+  background: #115e59;
+  transform: translateY(-1px);
+}
+
+.add-telegram-btn:disabled {
+  background: #94a3b8;
+  cursor: not-allowed;
+}
+
+.telegram-chat-list {
+  margin-top: 14px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.telegram-chat-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px 6px 12px;
+  border-radius: 999px;
+  background: #f1f5f9;
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  color: #0f172a;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.delete-telegram-btn {
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  background: #ef4444;
+  color: white;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.delete-telegram-btn:hover:not(:disabled) {
+  background: #dc2626;
+}
+
+.delete-telegram-btn:disabled {
+  background: #fca5a5;
+  cursor: not-allowed;
+}
+
+.telegram-empty {
+  margin: 14px 0 0;
+  color: #64748b;
+  font-size: 14px;
 }
 
 .tab-content {
@@ -1060,6 +1326,10 @@ watch(recordingsByAttempt, (groups) => {
     flex-direction: column;
     align-items: flex-start;
     gap: 16px;
+  }
+
+  .telegram-settings-controls {
+    grid-template-columns: 1fr;
   }
 }
 </style>

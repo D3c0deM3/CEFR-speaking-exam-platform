@@ -32,12 +32,17 @@
         <span class="brand-title">CEFR Speaking</span>
         <span class="brand-sub">Mock Test</span>
       </div>
-      <div class="top-meta">
-        <div class="chip part-chip">{{ currentPartLabel }}</div>
-        <div class="chip question-chip">Question {{ currentQuestion + 1 }} / {{ questions.length }}</div>
+      <div class="top-center">
+        <div class="top-meta">
+          <div class="chip part-chip">{{ currentPartLabel }}</div>
+          <div class="chip question-chip">Question {{ currentQuestion + 1 }} / {{ questions.length }}</div>
+        </div>
+        <div class="timer" :class="{ warning: timeRemaining < 10 }">
+          {{ formattedTime }}
+        </div>
       </div>
-      <div class="timer" :class="{ warning: timeRemaining < 10 }">
-        {{ formattedTime }}
+      <div class="top-right" aria-hidden="true">
+        <div class="logo-slot"></div>
       </div>
     </header>
 
@@ -46,8 +51,9 @@
       <div class="progress-text">{{ currentPartLabel }} - Question {{ currentQuestion + 1 }}</div>
     </div>
 
-    <main class="exam-layout" v-if="currentQuestionData">
-      <section class="question-card">
+    <template v-if="currentQuestionData">
+      <main class="exam-layout">
+        <section class="question-card">
         <div class="status-row">
           <span class="status-pill" :class="{ playing: isPlaying, recording: isRecording }">
             {{ statusLabel }}
@@ -56,17 +62,36 @@
           <span class="info-pill" v-if="hasQuestionImage">Image Prompt</span>
         </div>
 
-        <div
-          v-if="currentQuestionData?.text"
-          class="question-text"
-          :class="{ 'question-text-hidden': isQuickPrepActive }"
-        >
-          {{ currentQuestionData.text }}
-        </div>
+        <template v-if="isPart2">
+          <div class="image-frame" v-if="hasQuestionImage && imageUrl">
+            <img :src="imageUrl" alt="Question visual" />
+          </div>
+          <div
+            v-if="showQuestionText"
+            class="question-text question-text-list"
+            :class="{ 'question-text-hidden': isQuickPrepActive }"
+          >
+            <ol class="question-list">
+              <li v-for="(line, index) in questionLines" :key="`${currentQuestionData?.id}-${index}`">
+                {{ line }}
+              </li>
+            </ol>
+          </div>
+        </template>
 
-        <div class="image-frame" v-if="hasQuestionImage && imageUrl">
-          <img :src="imageUrl" alt="Question visual" />
-        </div>
+        <template v-else>
+          <div
+            v-if="showQuestionText"
+            class="question-text"
+            :class="{ 'question-text-hidden': isQuickPrepActive }"
+          >
+            {{ questionText }}
+          </div>
+
+          <div class="image-frame" v-if="hasQuestionImage && imageUrl">
+            <img :src="imageUrl" alt="Question visual" />
+          </div>
+        </template>
 
         <div class="audio-player" v-if="hasQuestionAudio">
           <button
@@ -86,94 +111,163 @@
           {{ isPreparing ? 'Preparation time. Recording begins after the bell.' : 'No audio prompt. Recording begins after the bell.' }}
         </div>
 
-        <div class="voice-visual" :class="{ active: isRecording }">
-          <div class="voice-waves" aria-hidden="true" :style="waveStyle">
-            <svg class="wave-svg" viewBox="0 0 600 120" role="presentation">
-              <defs>
-                <linearGradient id="waveGradient" x1="0%" y1="0%" x2="100%" y2="0%">
-                  <stop offset="0%" stop-color="#38bdf8" />
-                  <stop offset="45%" stop-color="#6366f1" />
-                  <stop offset="100%" stop-color="#fb7185" />
-                </linearGradient>
-                <linearGradient id="waveAccent" x1="0%" y1="0%" x2="100%" y2="0%">
-                  <stop offset="0%" stop-color="#22d3ee" />
-                  <stop offset="50%" stop-color="#a855f7" />
-                  <stop offset="100%" stop-color="#f97316" />
-                </linearGradient>
-                <filter id="waveGlow" x="-20%" y="-50%" width="140%" height="200%">
-                  <feGaussianBlur stdDeviation="6" result="blur" />
-                  <feMerge>
-                    <feMergeNode in="blur" />
-                    <feMergeNode in="SourceGraphic" />
-                  </feMerge>
-                </filter>
-              </defs>
-              <path
-                class="wave-base"
-                d="M0 60 C60 55 120 65 180 60 C240 55 300 65 360 60 C420 55 480 65 540 60 C570 58 600 60 600 60"
-              />
-              <path
-                class="wave wave-1"
-                d="M0 60 C60 20 120 100 180 60 C240 20 300 100 360 60 C420 20 480 100 540 60 C570 50 600 60 600 60"
-              />
-              <path
-                class="wave wave-2"
-                d="M0 60 C70 40 140 80 210 60 C280 40 350 80 420 60 C490 40 560 80 600 60"
-              />
-              <path
-                class="wave wave-3"
-                d="M0 60 C80 55 160 65 240 60 C320 55 400 65 480 60 C560 55 600 60 600 60"
-              />
-              <path
-                class="wave wave-4"
-                d="M0 60 C90 70 180 50 270 60 C360 70 450 50 540 60 C580 64 600 60 600 60"
-              />
-              <path
-                class="wave wave-5"
-                d="M0 60 C75 30 150 90 225 60 C300 30 375 90 450 60 C525 30 600 60 600 60"
-              />
-              <path
-                class="wave wave-6"
-                d="M0 60 C100 45 200 75 300 60 C400 45 500 75 600 60"
-              />
-            </svg>
+        <div class="voice-slot" v-if="!placeVoiceInSidebar">
+          <div class="voice-panel">
+            <div class="voice-visual" :class="{ active: isRecording }">
+              <div class="voice-waves" aria-hidden="true" :style="waveStyle">
+                <svg class="wave-svg" viewBox="0 0 600 120" role="presentation">
+                  <defs>
+                    <linearGradient id="waveGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+                      <stop offset="0%" stop-color="#38bdf8" />
+                      <stop offset="45%" stop-color="#6366f1" />
+                      <stop offset="100%" stop-color="#fb7185" />
+                    </linearGradient>
+                    <linearGradient id="waveAccent" x1="0%" y1="0%" x2="100%" y2="0%">
+                      <stop offset="0%" stop-color="#22d3ee" />
+                      <stop offset="50%" stop-color="#a855f7" />
+                      <stop offset="100%" stop-color="#f97316" />
+                    </linearGradient>
+                    <filter id="waveGlow" x="-20%" y="-50%" width="140%" height="200%">
+                      <feGaussianBlur stdDeviation="6" result="blur" />
+                      <feMerge>
+                        <feMergeNode in="blur" />
+                        <feMergeNode in="SourceGraphic" />
+                      </feMerge>
+                    </filter>
+                  </defs>
+                  <path
+                    class="wave-base"
+                    d="M0 60 C60 55 120 65 180 60 C240 55 300 65 360 60 C420 55 480 65 540 60 C570 58 600 60 600 60"
+                  />
+                  <path
+                    class="wave wave-1"
+                    d="M0 60 C60 20 120 100 180 60 C240 20 300 100 360 60 C420 20 480 100 540 60 C570 50 600 60 600 60"
+                  />
+                  <path
+                    class="wave wave-2"
+                    d="M0 60 C70 40 140 80 210 60 C280 40 350 80 420 60 C490 40 560 80 600 60"
+                  />
+                  <path
+                    class="wave wave-3"
+                    d="M0 60 C80 55 160 65 240 60 C320 55 400 65 480 60 C560 55 600 60 600 60"
+                  />
+                  <path
+                    class="wave wave-4"
+                    d="M0 60 C90 70 180 50 270 60 C360 70 450 50 540 60 C580 64 600 60 600 60"
+                  />
+                  <path
+                    class="wave wave-5"
+                    d="M0 60 C75 30 150 90 225 60 C300 30 375 90 450 60 C525 30 600 60 600 60"
+                  />
+                  <path
+                    class="wave wave-6"
+                    d="M0 60 C100 45 200 75 300 60 C400 45 500 75 600 60"
+                  />
+                </svg>
+              </div>
+              <span>
+                {{ isPreparing ? 'Preparation time' : isRecording ? 'Recording your response' : 'Ready to record' }}
+              </span>
+            </div>
+            <div class="auto-note" v-if="!isPlaying && !isRecording && !isPreparing && !isQuickPrepActive">
+              Recording starts after the bell.
+            </div>
           </div>
-          <span>
-            {{ isPreparing ? 'Preparation time' : isRecording ? 'Recording your response' : 'Ready to record' }}
-          </span>
         </div>
-        <div class="auto-note" v-if="!isPlaying && !isRecording && !isPreparing && !isQuickPrepActive">
-          Recording starts after the bell.
-        </div>
+
       </section>
 
-      <section class="info-card">
-        <h3>Instructions</h3>
-        <p v-if="currentPart === 1 && currentSubPart === 1">
-          Part 1.1: Short personal questions. Keep your answers brief and natural.
-        </p>
-        <p v-else-if="currentPart === 1 && currentSubPart === 2">
-          Part 1.2: Look at the image and respond with details and opinions.
-        </p>
-        <p v-else-if="currentPart === 2">
-          Part 2: Speak for 1-2 minutes on the prompt.
-        </p>
-        <p v-else>
-          Part 3: One discussion question related to the Part 2 topic.
-        </p>
+      <aside class="side-column">
+        <section class="info-card">
+          <h3>Instructions</h3>
+          <p v-if="currentPart === 1 && currentSubPart === 1">
+            Part 1.1: Short personal questions. Keep your answers brief and natural.
+          </p>
+          <p v-else-if="currentPart === 1 && currentSubPart === 2">
+            Part 1.2: Look at the image and respond with details and opinions.
+          </p>
+          <p v-else-if="currentPart === 2">
+            Part 2: Speak for 1-2 minutes on the prompt.
+          </p>
+          <p v-else>
+            Part 3: One discussion question related to the Part 2 topic.
+          </p>
 
-        <div class="info-grid">
-          <div class="info-item">
-            <span class="info-label">Response Time</span>
-            <span class="info-value">{{ currentQuestionData?.response_time || 0 }}s</span>
+          <div class="info-grid">
+            <div class="info-item">
+              <span class="info-label">Response Time</span>
+              <span class="info-value">{{ currentQuestionData?.response_time || 0 }}s</span>
+            </div>
+            <div class="info-item">
+              <span class="info-label">Progress</span>
+              <span class="info-value">{{ progress }}%</span>
+            </div>
           </div>
-          <div class="info-item">
-            <span class="info-label">Progress</span>
-            <span class="info-value">{{ progress }}%</span>
+        </section>
+        <div class="voice-panel is-sidebar" v-if="placeVoiceInSidebar">
+          <div class="voice-visual" :class="{ active: isRecording }">
+            <div class="voice-waves" aria-hidden="true" :style="waveStyle">
+              <svg class="wave-svg" viewBox="0 0 600 120" role="presentation">
+                <defs>
+                  <linearGradient id="waveGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+                    <stop offset="0%" stop-color="#38bdf8" />
+                    <stop offset="45%" stop-color="#6366f1" />
+                    <stop offset="100%" stop-color="#fb7185" />
+                  </linearGradient>
+                  <linearGradient id="waveAccent" x1="0%" y1="0%" x2="100%" y2="0%">
+                    <stop offset="0%" stop-color="#22d3ee" />
+                    <stop offset="50%" stop-color="#a855f7" />
+                    <stop offset="100%" stop-color="#f97316" />
+                  </linearGradient>
+                  <filter id="waveGlow" x="-20%" y="-50%" width="140%" height="200%">
+                    <feGaussianBlur stdDeviation="6" result="blur" />
+                    <feMerge>
+                      <feMergeNode in="blur" />
+                      <feMergeNode in="SourceGraphic" />
+                    </feMerge>
+                  </filter>
+                </defs>
+                <path
+                  class="wave-base"
+                  d="M0 60 C60 55 120 65 180 60 C240 55 300 65 360 60 C420 55 480 65 540 60 C570 58 600 60 600 60"
+                />
+                <path
+                  class="wave wave-1"
+                  d="M0 60 C60 20 120 100 180 60 C240 20 300 100 360 60 C420 20 480 100 540 60 C570 50 600 60 600 60"
+                />
+                <path
+                  class="wave wave-2"
+                  d="M0 60 C70 40 140 80 210 60 C280 40 350 80 420 60 C490 40 560 80 600 60"
+                />
+                <path
+                  class="wave wave-3"
+                  d="M0 60 C80 55 160 65 240 60 C320 55 400 65 480 60 C560 55 600 60 600 60"
+                />
+                <path
+                  class="wave wave-4"
+                  d="M0 60 C90 70 180 50 270 60 C360 70 450 50 540 60 C580 64 600 60 600 60"
+                />
+                <path
+                  class="wave wave-5"
+                  d="M0 60 C75 30 150 90 225 60 C300 30 375 90 450 60 C525 30 600 60 600 60"
+                />
+                <path
+                  class="wave wave-6"
+                  d="M0 60 C100 45 200 75 300 60 C400 45 500 75 600 60"
+                />
+              </svg>
+            </div>
+            <span>
+              {{ isPreparing ? 'Preparation time' : isRecording ? 'Recording your response' : 'Ready to record' }}
+            </span>
+          </div>
+          <div class="auto-note" v-if="!isPlaying && !isRecording && !isPreparing && !isQuickPrepActive">
+            Recording starts after the bell.
           </div>
         </div>
-      </section>
+      </aside>
     </main>
+    </template>
 
     <div v-else class="loading">
       Loading questions...
@@ -249,10 +343,27 @@ const timeRemaining = computed(() => examStore.timeRemaining)
 const formattedTime = computed(() => examStore.formattedTime)
 const progress = computed(() => examStore.progress)
 const isFinished = computed(() => examStore.isFinished)
+const isPart2 = computed(() => currentPart.value === 2)
+const questionText = computed(() => (currentQuestionData.value?.text || '').trim())
+const questionLines = computed(() => {
+  if (!questionText.value) return []
+  return questionText.value
+    .split(/\r?\n/)
+    .map(line => line.trim())
+    .filter(Boolean)
+})
+const showQuestionText = computed(() => currentPart.value !== 3 && questionLines.value.length > 0)
+const quickPrepDuration = computed(() => {
+  if (currentPart.value === 1 && currentSubPart.value === 2 && currentQuestion.value === 0) {
+    return QUICK_PREP_PART1_2_FIRST_SECONDS
+  }
+  return QUICK_PREP_SECONDS
+})
 
 const PREP_SECONDS = 60
 const INSTRUCTION_FADE_MS = 450
 const QUICK_PREP_SECONDS = 5
+const QUICK_PREP_PART1_2_FIRST_SECONDS = 10
 const QUICK_PREP_FADE_MS = 350
 const POST_RECORD_DELAY_MS = 2000
 
@@ -313,6 +424,8 @@ const hasQuestionImage = computed(() => {
   return typeof imagePath === 'string' && imagePath.trim() !== ''
 })
 
+const placeVoiceInSidebar = computed(() => hasQuestionImage.value)
+
 const statusLabel = computed(() => {
   if (isQuickPrepActive.value) return 'Get ready'
   if (isPreparing.value) return 'Preparation time'
@@ -353,6 +466,7 @@ watch(currentQuestionData, async (value) => {
   if (!value || isFinished.value) return
   await handleQuestionChange()
 }, { immediate: true })
+
 
 watch(timeRemaining, async (value) => {
   if (value === 4 && isRecording.value && !isPreparing.value) {
@@ -551,10 +665,11 @@ async function runQuickPrepCountdown() {
   const token = quickPrepToken
   isQuickPrepActive.value = true
   isQuickPrepFading.value = false
-  quickPrepCount.value = QUICK_PREP_SECONDS
+  const duration = quickPrepDuration.value
+  quickPrepCount.value = duration
   examStore.stopTimer()
 
-  for (let remaining = QUICK_PREP_SECONDS; remaining > 0; remaining -= 1) {
+  for (let remaining = duration; remaining > 0; remaining -= 1) {
     if (isUnmounting || token !== quickPrepToken) return
     quickPrepCount.value = remaining
     await delay(1000)
@@ -1024,7 +1139,7 @@ function returnToStart() {
   position: relative;
   z-index: 1;
   display: grid;
-  grid-template-columns: 1fr auto auto;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
   align-items: center;
   gap: 16px;
   padding: 16px 24px;
@@ -1039,6 +1154,27 @@ function returnToStart() {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  min-width: 0;
+}
+
+.top-center {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.top-right {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  min-height: 40px;
+}
+
+.logo-slot {
+  min-width: 64px;
+  min-height: 32px;
 }
 
 .brand-title {
@@ -1138,6 +1274,12 @@ function returnToStart() {
   align-items: start;
 }
 
+.side-column {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
 .question-card,
 .info-card {
   background: rgba(255, 255, 255, 0.92);
@@ -1172,6 +1314,27 @@ function returnToStart() {
 
 .question-text-hidden {
   opacity: 0;
+}
+
+.question-text-list {
+  margin-bottom: 18px;
+}
+
+.question-list {
+  margin: 0;
+  padding-left: 26px;
+  color: #0f172a;
+  font-size: 17px;
+  font-weight: 600;
+  line-height: 1.6;
+}
+
+.question-list li {
+  margin-bottom: 8px;
+}
+
+.question-list li:last-child {
+  margin-bottom: 0;
 }
 
 .status-pill {
@@ -1209,12 +1372,17 @@ function returnToStart() {
   margin-bottom: 24px;
   border: 1px solid rgba(15, 23, 42, 0.08);
   background: #fff7ed;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: 16px;
 }
 
 .image-frame img {
-  width: 100%;
+  max-width: 100%;
+  max-height: 360px;
   display: block;
-  object-fit: cover;
+  object-fit: contain;
 }
 
 .audio-player {
@@ -1259,11 +1427,30 @@ function returnToStart() {
   font-weight: 600;
 }
 
+.voice-panel {
+  --voice-anchor-margin: 24px;
+  --voice-sidebar-margin: 20px;
+  margin-top: var(--voice-anchor-margin);
+  display: flex;
+  flex-direction: column;
+}
+
+.voice-panel.is-sidebar {
+  margin-top: var(--voice-sidebar-margin);
+  padding: 22px;
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  box-shadow: 0 20px 60px rgba(15, 23, 42, 0.1);
+}
+
+.voice-slot {
+  width: 100%;
+}
 .voice-visual {
   display: flex;
   align-items: center;
   gap: 16px;
-  margin-top: 24px;
   padding: 16px 20px;
   background: rgba(15, 23, 42, 0.04);
   border-radius: 18px;
@@ -1507,6 +1694,14 @@ function returnToStart() {
     text-align: center;
   }
 
+  .top-center {
+    flex-direction: column;
+  }
+
+  .top-right {
+    display: none;
+  }
+
   .top-meta {
     justify-content: center;
   }
@@ -1517,6 +1712,10 @@ function returnToStart() {
 
   .exam-layout {
     grid-template-columns: 1fr;
+  }
+
+  .side-column {
+    order: 2;
   }
 }
 

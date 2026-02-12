@@ -1,9 +1,12 @@
 use serde::{Deserialize, Serialize};
-use rusqlite::{Connection, params, OptionalExtension, ToSql};
+use rusqlite::{Connection, params, OptionalExtension};
 use tauri::{AppHandle, Manager};
 use rand::{distributions::Alphanumeric, Rng};
+use reqwest::multipart::{Form, Part};
+use std::collections::HashSet;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Question {
@@ -13,6 +16,8 @@ pub struct Question {
     pub audio_path: String,
     pub image_path: String,
     pub text: String,
+    pub pack_id: String,
+    pub pack_order: i32,
     pub response_time: i32,
     pub active: bool,
 }
@@ -49,6 +54,17 @@ pub struct Recording {
     pub duration: i32,
 }
 
+const DEFAULT_TELEGRAM_BOT_TOKEN: &str = "8505694385:AAELharS3HfJoSc4CmAxinNFRR-LteH5dIA";
+const TELEGRAM_API_BASE: &str = "https://api.telegram.org";
+const TELEGRAM_CHAT_ID_SETTING_KEY: &str = "telegram_chat_id";
+const TELEGRAM_CHAT_IDS_SETTING_KEY: &str = "telegram_chat_ids";
+
+#[derive(Deserialize, Debug)]
+struct TelegramApiResponse {
+    ok: bool,
+    description: Option<String>,
+}
+
 // Initialize database connection
 fn init_db(app_handle: &AppHandle) -> Result<Connection, String> {
     let app_dir = app_handle.path().app_data_dir()
@@ -75,6 +91,8 @@ fn init_db(app_handle: &AppHandle) -> Result<Connection, String> {
             audio_path TEXT NOT NULL,
             image_path TEXT NOT NULL DEFAULT '',
             text TEXT NOT NULL DEFAULT '',
+            pack_id TEXT NOT NULL DEFAULT '',
+            pack_order INTEGER NOT NULL DEFAULT 0,
             response_time INTEGER NOT NULL,
             active BOOLEAN DEFAULT 1
         );
@@ -98,12 +116,19 @@ fn init_db(app_handle: &AppHandle) -> Result<Connection, String> {
             pronunciation INTEGER CHECK (pronunciation BETWEEN 1 AND 9),
             comment TEXT,
             FOREIGN KEY (response_id) REFERENCES responses (id)
+        );
+
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL DEFAULT ''
         );"
     ).map_err(|e| e.to_string())?;
     
     ensure_column(&conn, "questions", "sub_part", "INTEGER NOT NULL DEFAULT 0")?;
     ensure_column(&conn, "questions", "image_path", "TEXT NOT NULL DEFAULT ''")?;
     ensure_column(&conn, "questions", "text", "TEXT NOT NULL DEFAULT ''")?;
+    ensure_column(&conn, "questions", "pack_id", "TEXT NOT NULL DEFAULT ''")?;
+    ensure_column(&conn, "questions", "pack_order", "INTEGER NOT NULL DEFAULT 0")?;
     conn.execute(
         "UPDATE questions SET sub_part = 1 WHERE part = 1 AND sub_part = 0",
         [],
@@ -166,6 +191,528 @@ fn unique_filename(dir: &Path, filename: &str) -> Result<String, String> {
     Err("Failed to generate unique filename".to_string())
 }
 
+fn telegram_bot_token() -> String {
+    std::env::var("TELEGRAM_BOT_TOKEN").unwrap_or_else(|_| DEFAULT_TELEGRAM_BOT_TOKEN.to_string())
+}
+
+fn normalize_telegram_chat_ids(values: Vec<String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut normalized = Vec::new();
+
+    for value in values {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let candidate = trimmed.to_string();
+        if seen.insert(candidate.clone()) {
+            normalized.push(candidate);
+        }
+    }
+
+    normalized
+}
+
+fn parse_telegram_chat_ids(raw: &str) -> Vec<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+
+    if trimmed.starts_with('[') {
+        if let Ok(values) = serde_json::from_str::<Vec<String>>(trimmed) {
+            return normalize_telegram_chat_ids(values);
+        }
+    }
+
+    let values = trimmed
+        .split(|c| c == ',' || c == ';' || c == '\n')
+        .map(|value| value.to_string())
+        .collect::<Vec<_>>();
+    normalize_telegram_chat_ids(values)
+}
+
+fn env_telegram_chat_ids() -> Vec<String> {
+    if let Ok(value) = std::env::var("TELEGRAM_CHAT_IDS") {
+        let ids = parse_telegram_chat_ids(&value);
+        if !ids.is_empty() {
+            return ids;
+        }
+    }
+
+    if let Ok(value) = std::env::var("TELEGRAM_CHAT_ID") {
+        return parse_telegram_chat_ids(&value);
+    }
+
+    Vec::new()
+}
+
+fn stored_telegram_chat_ids(conn: &Connection) -> Result<Option<Vec<String>>, String> {
+    let saved_chat_ids_raw: Option<String> = conn
+        .query_row(
+            "SELECT value FROM app_settings WHERE key = ?",
+            params![TELEGRAM_CHAT_IDS_SETTING_KEY],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+
+    if let Some(value) = saved_chat_ids_raw {
+        return Ok(Some(parse_telegram_chat_ids(&value)));
+    }
+
+    let legacy_chat_id_raw: Option<String> = conn
+        .query_row(
+            "SELECT value FROM app_settings WHERE key = ?",
+            params![TELEGRAM_CHAT_ID_SETTING_KEY],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+
+    Ok(legacy_chat_id_raw.map(|value| parse_telegram_chat_ids(&value)))
+}
+
+fn persist_telegram_chat_ids(conn: &Connection, chat_ids: &[String]) -> Result<(), String> {
+    let serialized_ids =
+        serde_json::to_string(chat_ids).map_err(|e| format!("Failed to serialize chat IDs: {}", e))?;
+    let primary_chat_id = chat_ids
+        .first()
+        .map(|value| value.as_str())
+        .unwrap_or_default();
+
+    conn.execute(
+        "INSERT INTO app_settings (key, value) VALUES (?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![TELEGRAM_CHAT_IDS_SETTING_KEY, serialized_ids],
+    )
+    .map_err(|e| e.to_string())?;
+
+    conn.execute(
+        "INSERT INTO app_settings (key, value) VALUES (?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![TELEGRAM_CHAT_ID_SETTING_KEY, primary_chat_id],
+    )
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+fn load_telegram_chat_ids(conn: &Connection) -> Result<Vec<String>, String> {
+    if let Some(chat_ids) = stored_telegram_chat_ids(conn)? {
+        if chat_ids.is_empty() {
+            return Err("Telegram chat IDs are not configured. Add at least one in Admin Dashboard.".to_string());
+        }
+        return Ok(chat_ids);
+    }
+
+    let env_chat_ids = env_telegram_chat_ids();
+    if !env_chat_ids.is_empty() {
+        return Ok(env_chat_ids);
+    }
+
+    Err("Telegram chat IDs are not configured. Add at least one in Admin Dashboard.".to_string())
+}
+
+fn truncate_for_telegram(value: &str, max_chars: usize) -> String {
+    let mut iter = value.chars();
+    let mut truncated: String = iter.by_ref().take(max_chars).collect();
+    if iter.next().is_some() {
+        if max_chars > 3 {
+            truncated.truncate(max_chars.saturating_sub(3));
+            truncated.push_str("...");
+        }
+    }
+    truncated
+}
+
+fn format_part_label(part: i32, sub_part: i32) -> String {
+    if part == 1 && (sub_part == 1 || sub_part == 2) {
+        return format!("Part 1.{}", sub_part);
+    }
+    format!("Part {}", part)
+}
+
+fn resolve_image_path(app_dir: &Path, image_path: &str) -> Option<PathBuf> {
+    let trimmed = image_path.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let path = Path::new(trimmed);
+    if path.is_absolute() {
+        return Some(path.to_path_buf());
+    }
+
+    Some(app_dir.join("images").join(trimmed))
+}
+
+fn guess_mime(path: &Path, is_image: bool) -> &'static str {
+    match path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        "mp3" => "audio/mpeg",
+        "m4a" => "audio/mp4",
+        "ogg" => "audio/ogg",
+        "wav" => "audio/wav",
+        "webm" => "audio/webm",
+        _ if is_image => "application/octet-stream",
+        _ => "application/octet-stream",
+    }
+}
+
+fn convert_audio_to_mp3(source_path: &Path) -> Result<PathBuf, String> {
+    if !source_path.exists() {
+        return Err(format!(
+            "Cannot convert to MP3 because source file does not exist: {:?}",
+            source_path
+        ));
+    }
+
+    let ffmpeg_available = Command::new("ffmpeg")
+        .arg("-version")
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false);
+
+    if !ffmpeg_available {
+        return Err(
+            "ffmpeg is not installed or not available in PATH. Install ffmpeg to send MP3 files."
+                .to_string(),
+        );
+    }
+
+    let stem = source_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("response");
+    let suffix: String = rand::thread_rng()
+        .sample_iter(&Alphanumeric)
+        .take(8)
+        .map(char::from)
+        .collect();
+    let output_path = std::env::temp_dir().join(format!("{}_{}_telegram.mp3", stem, suffix));
+
+    let status = Command::new("ffmpeg")
+        .arg("-y")
+        .arg("-i")
+        .arg(source_path)
+        .arg("-vn")
+        .arg("-codec:a")
+        .arg("libmp3lame")
+        .arg("-q:a")
+        .arg("2")
+        .arg(&output_path)
+        .status()
+        .map_err(|e| format!("Failed to run ffmpeg for MP3 conversion: {}", e))?;
+
+    if !status.success() {
+        return Err("ffmpeg failed to convert recording to MP3".to_string());
+    }
+
+    if !output_path.exists() {
+        return Err("MP3 conversion finished but output file was not created".to_string());
+    }
+
+    Ok(output_path)
+}
+
+async fn parse_telegram_response(
+    response: reqwest::Response,
+    endpoint: &str,
+) -> Result<(), String> {
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|e| format!("Failed to read Telegram {} response: {}", endpoint, e))?;
+
+    if !status.is_success() {
+        return Err(format!(
+            "Telegram {} failed with HTTP {}: {}",
+            endpoint, status, body
+        ));
+    }
+
+    let parsed: TelegramApiResponse = serde_json::from_str(&body).map_err(|e| {
+        format!(
+            "Failed to parse Telegram {} response JSON: {} (body: {})",
+            endpoint, e, body
+        )
+    })?;
+
+    if !parsed.ok {
+        return Err(format!(
+            "Telegram {} returned error: {}",
+            endpoint,
+            parsed
+                .description
+                .unwrap_or_else(|| "Unknown Telegram error".to_string())
+        ));
+    }
+
+    Ok(())
+}
+
+async fn send_telegram_message(
+    client: &reqwest::Client,
+    bot_token: &str,
+    chat_id: &str,
+    text: &str,
+) -> Result<(), String> {
+    let url = format!("{}/bot{}/sendMessage", TELEGRAM_API_BASE, bot_token);
+    let response = client
+        .post(url)
+        .form(&[("chat_id", chat_id), ("text", text)])
+        .send()
+        .await
+        .map_err(|e| format!("Failed to call Telegram sendMessage: {}", e))?;
+
+    parse_telegram_response(response, "sendMessage").await
+}
+
+async fn send_telegram_photo(
+    client: &reqwest::Client,
+    bot_token: &str,
+    chat_id: &str,
+    image_path: &Path,
+    caption: &str,
+) -> Result<(), String> {
+    let image_data =
+        fs::read(image_path).map_err(|e| format!("Failed to read image file for Telegram: {}", e))?;
+    let image_name = image_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("prompt_image.bin")
+        .to_string();
+
+    let image_part = Part::bytes(image_data)
+        .file_name(image_name)
+        .mime_str(guess_mime(image_path, true))
+        .map_err(|e| format!("Failed to set Telegram image MIME type: {}", e))?;
+
+    let mut form = Form::new()
+        .text("chat_id", chat_id.to_string())
+        .part("photo", image_part);
+
+    if !caption.trim().is_empty() {
+        form = form.text("caption", caption.to_string());
+    }
+
+    let url = format!("{}/bot{}/sendPhoto", TELEGRAM_API_BASE, bot_token);
+    let response = client
+        .post(url)
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to call Telegram sendPhoto: {}", e))?;
+
+    parse_telegram_response(response, "sendPhoto").await
+}
+
+async fn send_telegram_document(
+    client: &reqwest::Client,
+    bot_token: &str,
+    chat_id: &str,
+    file_path: &Path,
+    caption: &str,
+) -> Result<(), String> {
+    let file_data =
+        fs::read(file_path).map_err(|e| format!("Failed to read recording for Telegram: {}", e))?;
+    let file_name = file_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("response.webm")
+        .to_string();
+
+    let document_part = Part::bytes(file_data)
+        .file_name(file_name)
+        .mime_str(guess_mime(file_path, false))
+        .map_err(|e| format!("Failed to set Telegram document MIME type: {}", e))?;
+
+    let mut form = Form::new()
+        .text("chat_id", chat_id.to_string())
+        .part("document", document_part);
+
+    if !caption.trim().is_empty() {
+        form = form.text("caption", caption.to_string());
+    }
+
+    let url = format!("{}/bot{}/sendDocument", TELEGRAM_API_BASE, bot_token);
+    let response = client
+        .post(url)
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to call Telegram sendDocument: {}", e))?;
+
+    parse_telegram_response(response, "sendDocument").await
+}
+
+async fn send_response_to_telegram(
+    app_dir: &Path,
+    chat_id: &str,
+    student_name: &str,
+    question_id: i64,
+    part: i32,
+    sub_part: i32,
+    question_text: &str,
+    image_path: &str,
+    duration: i32,
+    audio_file_path: &Path,
+) -> Result<(), String> {
+    let bot_token = telegram_bot_token();
+    let client = reqwest::Client::new();
+    let part_label = format_part_label(part, sub_part);
+    let question = if question_text.trim().is_empty() {
+        "(No question text provided)"
+    } else {
+        question_text.trim()
+    };
+
+    let message = format!(
+        "New CEFR speaking response\nStudent: {}\nSection: {}\nQuestion ID: {}\nQuestion: {}\nDuration: {}s",
+        student_name, part_label, question_id, question, duration
+    );
+
+    send_telegram_message(
+        &client,
+        &bot_token,
+        chat_id,
+        &truncate_for_telegram(&message, 4096),
+    )
+    .await?;
+
+    if let Some(resolved_image_path) = resolve_image_path(app_dir, image_path) {
+        if resolved_image_path.exists() {
+            let image_caption = format!(
+                "Prompt image for {} (Question {})",
+                part_label, question_id
+            );
+            send_telegram_photo(
+                &client,
+                &bot_token,
+                chat_id,
+                &resolved_image_path,
+                &truncate_for_telegram(&image_caption, 1024),
+            )
+            .await?;
+        } else {
+            println!(
+                "Warning: image file configured for question {} but not found at {:?}",
+                question_id, resolved_image_path
+            );
+        }
+    }
+
+    let mp3_caption = format!(
+        "Answer recording (MP3) | {} | Question {} | Student {}",
+        part_label, question_id, student_name
+    );
+    let fallback_caption = format!(
+        "Answer recording (original format) | {} | Question {} | Student {}",
+        part_label, question_id, student_name
+    );
+
+    match convert_audio_to_mp3(audio_file_path) {
+        Ok(mp3_file_path) => {
+            let send_result = send_telegram_document(
+                &client,
+                &bot_token,
+                chat_id,
+                &mp3_file_path,
+                &truncate_for_telegram(&mp3_caption, 1024),
+            )
+            .await;
+
+            if let Err(error) = fs::remove_file(&mp3_file_path) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    println!(
+                        "Warning: failed to delete temporary MP3 file {:?}: {}",
+                        mp3_file_path, error
+                    );
+                }
+            }
+
+            send_result?;
+        }
+        Err(error) => {
+            println!(
+                "Warning: MP3 conversion failed. Sending original recording instead. Reason: {}",
+                error
+            );
+            send_telegram_document(
+                &client,
+                &bot_token,
+                chat_id,
+                audio_file_path,
+                &truncate_for_telegram(&fallback_caption, 1024),
+            )
+            .await?;
+        }
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn get_telegram_chat_id(
+    app_handle: AppHandle,
+) -> Result<String, String> {
+    let conn = init_db(&app_handle)?;
+    if let Some(chat_ids) = stored_telegram_chat_ids(&conn)? {
+        return Ok(chat_ids.into_iter().next().unwrap_or_default());
+    }
+    Ok(env_telegram_chat_ids().into_iter().next().unwrap_or_default())
+}
+
+#[tauri::command]
+pub async fn set_telegram_chat_id(
+    app_handle: AppHandle,
+    chat_id: String,
+) -> Result<(), String> {
+    let trimmed = chat_id.trim();
+    if trimmed.is_empty() {
+        return Err("Telegram chat ID cannot be empty".to_string());
+    }
+
+    let conn = init_db(&app_handle)?;
+    persist_telegram_chat_ids(&conn, &[trimmed.to_string()])?;
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn get_telegram_chat_ids(
+    app_handle: AppHandle,
+) -> Result<Vec<String>, String> {
+    let conn = init_db(&app_handle)?;
+    if let Some(chat_ids) = stored_telegram_chat_ids(&conn)? {
+        return Ok(chat_ids);
+    }
+    Ok(env_telegram_chat_ids())
+}
+
+#[tauri::command]
+pub async fn set_telegram_chat_ids(
+    app_handle: AppHandle,
+    chat_ids: Vec<String>,
+) -> Result<Vec<String>, String> {
+    let normalized_chat_ids = normalize_telegram_chat_ids(chat_ids);
+    let conn = init_db(&app_handle)?;
+    persist_telegram_chat_ids(&conn, &normalized_chat_ids)?;
+
+    Ok(normalized_chat_ids)
+}
+
 #[tauri::command]
 pub async fn create_attempt(
     app_handle: AppHandle,
@@ -190,6 +737,59 @@ pub async fn get_random_questions(
     sub_part: Option<i32>,
 ) -> Result<Vec<Question>, String> {
     let conn = init_db(&app_handle)?;
+
+    let map_question = |row: &rusqlite::Row| {
+        Ok(Question {
+            id: row.get(0)?,
+            part: row.get(1)?,
+            sub_part: row.get(2)?,
+            audio_path: row.get(3)?,
+            image_path: row.get(4)?,
+            text: row.get(5)?,
+            pack_id: row.get(6)?,
+            pack_order: row.get(7)?,
+            response_time: row.get(8)?,
+            active: row.get(9)?,
+        })
+    };
+
+    if part == 1 {
+        if let Some(sub_part_value) = sub_part {
+            if sub_part_value == 1 || sub_part_value == 2 {
+                let pack_id: Option<String> = conn
+                    .query_row(
+                        "SELECT pack_id FROM questions
+                         WHERE part = ? AND sub_part = ? AND active = 1 AND pack_id <> ''
+                         GROUP BY pack_id
+                         ORDER BY RANDOM()
+                         LIMIT 1",
+                        params![part, sub_part_value],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map_err(|e| e.to_string())?;
+
+                if let Some(pack_id) = pack_id {
+                    let mut stmt = conn.prepare(
+                        "SELECT id, part, sub_part, audio_path, image_path, text, pack_id, pack_order, response_time, active
+                         FROM questions
+                         WHERE part = ? AND sub_part = ? AND active = 1 AND pack_id = ?
+                         ORDER BY pack_order ASC, id ASC",
+                    ).map_err(|e| e.to_string())?;
+
+                    let questions = stmt
+                        .query_map(params![part, sub_part_value, pack_id], map_question)
+                        .map_err(|e| e.to_string())?
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(|e| e.to_string())?;
+
+                    if !questions.is_empty() {
+                        return Ok(questions);
+                    }
+                }
+            }
+        }
+    }
     
     // Build the query
     let exclude_clause = if exclude_ids.is_empty() {
@@ -208,7 +808,7 @@ pub async fn get_random_questions(
     };
 
     let sql = format!(
-        "SELECT id, part, sub_part, audio_path, image_path, text, response_time, active 
+        "SELECT id, part, sub_part, audio_path, image_path, text, pack_id, pack_order, response_time, active 
          FROM questions 
          WHERE part = ? AND active = 1 {} {}
          ORDER BY RANDOM() 
@@ -217,19 +817,6 @@ pub async fn get_random_questions(
     );
     
     let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
-    
-    let map_question = |row: &rusqlite::Row| {
-        Ok(Question {
-            id: row.get(0)?,
-            part: row.get(1)?,
-            sub_part: row.get(2)?,
-            audio_path: row.get(3)?,
-            image_path: row.get(4)?,
-            text: row.get(5)?,
-            response_time: row.get(6)?,
-            active: row.get(7)?,
-        })
-    };
 
     let question_iter = match sub_part {
         Some(value) => stmt.query_map(params![part, value, count], map_question),
@@ -259,6 +846,13 @@ pub async fn save_response(
         params![attempt_id],
         |row| row.get(0),
     ).map_err(|e| e.to_string())?;
+    let (question_part, question_sub_part, question_text, question_image_path): (i32, i32, String, String) =
+        conn.query_row(
+            "SELECT part, sub_part, text, image_path FROM questions WHERE id = ?",
+            params![question_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .map_err(|e| e.to_string())?;
     
     // Create directory structure: responses/{date}/{student_name}/
     let app_dir = app_handle.path().app_data_dir()
@@ -289,6 +883,36 @@ pub async fn save_response(
          VALUES (?, ?, ?, ?)",
         params![attempt_id, question_id, filepath_str, duration],
     ).map_err(|e| e.to_string())?;
+
+    let target_chat_ids = load_telegram_chat_ids(&conn)?;
+    let mut send_errors = Vec::new();
+
+    for target_chat_id in target_chat_ids {
+        if let Err(error) = send_response_to_telegram(
+            &app_dir,
+            &target_chat_id,
+            &student_name,
+            question_id,
+            question_part,
+            question_sub_part,
+            &question_text,
+            &question_image_path,
+            duration,
+            &filepath,
+        )
+        .await
+        {
+            send_errors.push(format!("{} ({})", target_chat_id, error));
+        }
+    }
+
+    if !send_errors.is_empty() {
+        return Err(format!(
+            "Response saved locally but failed to send to Telegram for {} chat(s): {}",
+            send_errors.len(),
+            send_errors.join(" | ")
+        ));
+    }
     
     Ok(filepath_str)
 }
@@ -417,23 +1041,40 @@ pub async fn add_question(
     audio_path: Option<String>,
     image_path: Option<String>,
     text: Option<String>,
+    pack_id: Option<String>,
+    pack_order: Option<i32>,
 ) -> Result<i64, String> {
     let conn = init_db(&app_handle)?;
     
     // Use empty string if no audio path provided
     let audio = audio_path.unwrap_or_default();
     let image = image_path.unwrap_or_default();
-    let question_text = text.unwrap_or_default();
+    let question_text = if part == 3 { String::new() } else { text.unwrap_or_default() };
     let sub_part_value = sub_part.unwrap_or(0);
+    let pack_id_value = pack_id.unwrap_or_default();
+    let pack_order_value = pack_order.unwrap_or(0);
 
     if part == 1 && sub_part_value == 2 && image.is_empty() {
         return Err("Image is required for Part 1.2 questions".to_string());
     }
+
+    if part == 3 && image.is_empty() {
+        return Err("Image is required for Part 3 questions".to_string());
+    }
+
+    if part == 1 && (sub_part_value == 1 || sub_part_value == 2) {
+        if pack_id_value.trim().is_empty() {
+            return Err("Test pack ID is required for Part 1.1 and Part 1.2 questions".to_string());
+        }
+        if pack_order_value <= 0 {
+            return Err("Question order is required for Part 1.1 and Part 1.2 questions".to_string());
+        }
+    }
     
     conn.execute(
-        "INSERT INTO questions (part, sub_part, audio_path, image_path, text, response_time, active) 
-         VALUES (?, ?, ?, ?, ?, ?, 1)",
-        params![part, sub_part_value, audio, image, question_text, response_time],
+        "INSERT INTO questions (part, sub_part, audio_path, image_path, text, pack_id, pack_order, response_time, active) 
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)",
+        params![part, sub_part_value, audio, image, question_text, pack_id_value, pack_order_value, response_time],
     ).map_err(|e| e.to_string())?;
     
     Ok(conn.last_insert_rowid())
@@ -446,7 +1087,7 @@ pub async fn get_questions(
     let conn = init_db(&app_handle)?;
     
     let mut stmt = conn.prepare(
-        "SELECT id, part, sub_part, audio_path, image_path, text, response_time, active 
+        "SELECT id, part, sub_part, audio_path, image_path, text, pack_id, pack_order, response_time, active 
          FROM questions WHERE active = 1 ORDER BY part, sub_part, id"
     ).map_err(|e| e.to_string())?;
     
@@ -459,8 +1100,10 @@ pub async fn get_questions(
                 audio_path: row.get(3)?,
                 image_path: row.get(4)?,
                 text: row.get(5)?,
-                response_time: row.get(6)?,
-                active: row.get(7)?,
+                pack_id: row.get(6)?,
+                pack_order: row.get(7)?,
+                response_time: row.get(8)?,
+                active: row.get(9)?,
             })
         })
         .map_err(|e| e.to_string())?

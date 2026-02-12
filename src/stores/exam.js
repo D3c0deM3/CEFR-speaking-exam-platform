@@ -15,11 +15,21 @@ export const useExamStore = defineStore('exam', () => {
   const timerInterval = ref(null)
 
   const sections = [
-    { part: 1, subPart: 1, count: 3, label: '1.1' },
-    { part: 1, subPart: 2, count: 3, label: '1.2' },
-    { part: 2, subPart: 0, count: 1, label: '2' },
-    { part: 3, subPart: 0, count: 1, label: '3' }
+    { part: 1, subPart: 1, count: 3, label: '1.1', key: '1-1' },
+    { part: 1, subPart: 2, count: 3, label: '1.2', key: '1-2' },
+    { part: 2, subPart: 0, count: 1, label: '2', key: '2-0' },
+    { part: 3, subPart: 0, count: 1, label: '3', key: '3-0' }
   ]
+  const sectionCounts = ref({})
+
+  function getSectionKey(part, subPart) {
+    return `${part}-${subPart || 0}`
+  }
+
+  function setSectionCount(part, subPart, count) {
+    const key = getSectionKey(part, subPart)
+    sectionCounts.value = { ...sectionCounts.value, [key]: count }
+  }
   
   // Actions
   async function startExam(name) {
@@ -43,6 +53,7 @@ export const useExamStore = defineStore('exam', () => {
 
       questions.value = part1Questions
       timeRemaining.value = part1Questions[0]?.response_time || 30
+      setSectionCount(firstSection.part, firstSection.subPart, part1Questions.length)
       stopTimer()
       
     } catch (error) {
@@ -108,6 +119,7 @@ export const useExamStore = defineStore('exam', () => {
     
     questions.value = newQuestions
     timeRemaining.value = newQuestions[0]?.response_time || 30
+    setSectionCount(part, subPart, newQuestions.length)
   }
   
   async function finishExam() {
@@ -157,6 +169,7 @@ export const useExamStore = defineStore('exam', () => {
     isRecording.value = false
     timeRemaining.value = 0
     isFinished.value = false
+    sectionCounts.value = {}
   }
   
   // Getters
@@ -169,10 +182,16 @@ export const useExamStore = defineStore('exam', () => {
   const currentPartLabel = computed(() => `Part ${sections[currentSectionIndex.value]?.label || '1'}`)
 
   const progress = computed(() => {
-    const totalQuestions = sections.reduce((sum, section) => sum + section.count, 0)
+    const totalQuestions = sections.reduce((sum, section) => {
+      const count = sectionCounts.value[section.key] ?? section.count
+      return sum + count
+    }, 0)
     const answeredBefore = sections
       .slice(0, currentSectionIndex.value)
-      .reduce((sum, section) => sum + section.count, 0)
+      .reduce((sum, section) => {
+        const count = sectionCounts.value[section.key] ?? section.count
+        return sum + count
+      }, 0)
     const answered = answeredBefore + currentQuestion.value
 
     return Math.round((answered / totalQuestions) * 100)
