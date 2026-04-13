@@ -201,6 +201,99 @@
       </div>
 
       <div class="section">
+        <div class="transfer-header">
+          <div>
+            <h3>Import / Export Questions</h3>
+            <p>Export a filtered set into one file, then import that file to add the questions back into the app.</p>
+          </div>
+          <span class="transfer-count">{{ filteredExportQuestions.length }} ready</span>
+        </div>
+        <div class="form-grid">
+          <div class="form-group">
+            <label>Export Part</label>
+            <select v-model="exportOptions.part" class="form-input">
+              <option value="all">All parts</option>
+              <option value="1.1">Part 1.1</option>
+              <option value="1.2">Part 1.2</option>
+              <option value="2">Part 2</option>
+              <option value="3">Part 3</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Export Pack</label>
+            <select v-model="exportOptions.packId" class="form-input">
+              <option value="all">All packs</option>
+              <option
+                v-for="packId in exportPackOptions"
+                :key="packId"
+                :value="packId"
+              >
+                {{ packId }}
+              </option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>From Question ID</label>
+            <input
+              v-model="exportOptions.fromId"
+              type="number"
+              min="1"
+              class="form-input"
+              placeholder="Any"
+            />
+          </div>
+          <div class="form-group">
+            <label>To Question ID</label>
+            <input
+              v-model="exportOptions.toId"
+              type="number"
+              min="1"
+              class="form-input"
+              placeholder="Any"
+            />
+          </div>
+        </div>
+        <div class="transfer-actions">
+          <label class="checkbox-row">
+            <input v-model="exportOptions.selectedOnly" type="checkbox" />
+            <span>Export selected only ({{ selectedQuestionIds.length }})</span>
+          </label>
+          <button class="secondary-btn" @click="selectFilteredQuestions">
+            Select filtered
+          </button>
+          <button class="secondary-btn" @click="clearQuestionSelection">
+            Clear selection
+          </button>
+          <button
+            class="add-btn"
+            :disabled="exportingQuestions || filteredExportQuestions.length === 0"
+            @click="exportQuestionsFile"
+          >
+            {{ exportingQuestions ? 'Exporting...' : 'Export Questions' }}
+          </button>
+        </div>
+        <div class="import-row">
+          <input
+            ref="importFileInput"
+            type="file"
+            accept=".json,application/json"
+            class="file-input"
+            @change="onImportFileSelected"
+          />
+          <label class="file-label import-label" @click="$refs.importFileInput?.click()">
+            {{ importFileName ? `Selected: ${importFileName}` : 'Choose Export File' }}
+          </label>
+          <button
+            class="action-btn"
+            :disabled="importingQuestions || !importFileText"
+            @click="importQuestionsFile"
+          >
+            {{ importingQuestions ? 'Importing...' : 'Import Questions' }}
+          </button>
+        </div>
+      </div>
+
+      <div class="section">
         <h3>Existing Questions</h3>
         <div v-if="questions.length === 0" class="empty-state">
           <p>No questions added yet</p>
@@ -208,6 +301,14 @@
         <div v-else class="questions-list">
           <div v-for="question in questions" :key="question.id" class="question-card">
             <div class="question-info">
+              <label class="question-select">
+                <input
+                  type="checkbox"
+                  :checked="isQuestionSelected(question.id)"
+                  @change="toggleQuestionSelection(question.id, $event.target.checked)"
+                />
+                <span>ID {{ question.id }}</span>
+              </label>
               <strong>{{ formatPart(question.part, question.sub_part) }}</strong>
               <span v-if="question.text" class="question-text">{{ question.text }}</span>
               <span>{{ question.response_time }}s</span>
@@ -324,7 +425,20 @@ const telegramChatIds = ref([])
 const savingTelegramChatIds = ref(false)
 const audioInput = ref(null)
 const imageInput = ref(null)
+const importFileInput = ref(null)
 const selectedAttemptId = ref(null)
+const selectedQuestionIds = ref([])
+const exportingQuestions = ref(false)
+const importingQuestions = ref(false)
+const importFileName = ref('')
+const importFileText = ref('')
+const exportOptions = ref({
+  part: 'all',
+  packId: 'all',
+  fromId: '',
+  toId: '',
+  selectedOnly: false
+})
 
 const newQuestion = ref({
   part: '',
@@ -360,6 +474,51 @@ const recordingsByAttempt = computed(() => {
   return Array.from(groups.values())
 })
 
+const exportPackOptions = computed(() => {
+  const packIds = questions.value
+    .map(question => question.pack_id)
+    .filter(packId => typeof packId === 'string' && packId.trim())
+
+  return Array.from(new Set(packIds)).sort((a, b) => a.localeCompare(b))
+})
+
+const exportFilteredQuestions = computed(() => {
+  const fromId = parseOptionalPositiveInteger(exportOptions.value.fromId)
+  const toId = parseOptionalPositiveInteger(exportOptions.value.toId)
+
+  return questions.value.filter((question) => {
+    if (exportOptions.value.part !== 'all') {
+      const selectedPart = parsePartSelection(exportOptions.value.part)
+      if (question.part !== selectedPart.part || question.sub_part !== selectedPart.subPart) {
+        return false
+      }
+    }
+
+    if (exportOptions.value.packId !== 'all' && question.pack_id !== exportOptions.value.packId) {
+      return false
+    }
+
+    if (fromId !== null && question.id < fromId) {
+      return false
+    }
+
+    if (toId !== null && question.id > toId) {
+      return false
+    }
+
+    return true
+  })
+})
+
+const filteredExportQuestions = computed(() => {
+  if (!exportOptions.value.selectedOnly) {
+    return exportFilteredQuestions.value
+  }
+
+  const selectedIds = new Set(selectedQuestionIds.value)
+  return exportFilteredQuestions.value.filter(question => selectedIds.has(question.id))
+})
+
 const needsPack = computed(() => newQuestion.value.part === '1.1' || newQuestion.value.part === '1.2')
 const showImageUpload = computed(() => ['1.2', '2', '3'].includes(newQuestion.value.part))
 const imageRequired = computed(() => newQuestion.value.part === '1.2' || newQuestion.value.part === '3')
@@ -391,6 +550,18 @@ function onImageSelected(event) {
   }
 }
 
+async function onImportFileSelected(event) {
+  const file = event.target.files?.[0]
+  if (!file) {
+    importFileName.value = ''
+    importFileText.value = ''
+    return
+  }
+
+  importFileName.value = file.name
+  importFileText.value = await file.text()
+}
+
 async function loadAttempts() {
   try {
     const data = await invoke('get_attempts')
@@ -407,6 +578,8 @@ async function loadQuestions() {
   try {
     const data = await invoke('get_questions')
     questions.value = data || []
+    const activeIds = new Set(questions.value.map(question => question.id))
+    selectedQuestionIds.value = selectedQuestionIds.value.filter(id => activeIds.has(id))
   } catch (error) {
     console.error('Failed to load questions:', error)
   }
@@ -475,6 +648,87 @@ async function persistTelegramChatIds(nextChatIds) {
     return false
   } finally {
     savingTelegramChatIds.value = false
+  }
+}
+
+function isQuestionSelected(questionId) {
+  return selectedQuestionIds.value.includes(questionId)
+}
+
+function toggleQuestionSelection(questionId, isSelected) {
+  if (isSelected) {
+    if (!selectedQuestionIds.value.includes(questionId)) {
+      selectedQuestionIds.value = [...selectedQuestionIds.value, questionId]
+    }
+    return
+  }
+
+  selectedQuestionIds.value = selectedQuestionIds.value.filter(id => id !== questionId)
+}
+
+function selectFilteredQuestions() {
+  const nextIds = new Set(selectedQuestionIds.value)
+  exportFilteredQuestions.value.forEach(question => nextIds.add(question.id))
+  selectedQuestionIds.value = Array.from(nextIds)
+}
+
+function clearQuestionSelection() {
+  selectedQuestionIds.value = []
+}
+
+async function exportQuestionsFile() {
+  const questionIds = filteredExportQuestions.value.map(question => question.id)
+  if (questionIds.length === 0) {
+    alert('Choose at least one question to export')
+    return
+  }
+
+  exportingQuestions.value = true
+  try {
+    const exportJson = await invoke('export_questions', {
+      questionIds
+    })
+    const blob = new Blob([exportJson], { type: 'application/json' })
+    const downloadUrl = URL.createObjectURL(blob)
+    const downloadLink = document.createElement('a')
+    downloadLink.href = downloadUrl
+    downloadLink.download = `cefr-questions-${new Date().toISOString().slice(0, 10)}.json`
+    document.body.appendChild(downloadLink)
+    downloadLink.click()
+    downloadLink.remove()
+    URL.revokeObjectURL(downloadUrl)
+    alert(`Exported ${questionIds.length} question(s) successfully.`)
+  } catch (error) {
+    console.error('Failed to export questions:', error)
+    alert('Error exporting questions: ' + (error?.message || String(error)))
+  } finally {
+    exportingQuestions.value = false
+  }
+}
+
+async function importQuestionsFile() {
+  if (!importFileText.value) {
+    alert('Choose a questions export file first')
+    return
+  }
+
+  importingQuestions.value = true
+  try {
+    const result = await invoke('import_questions', {
+      exportJson: importFileText.value
+    })
+    await loadQuestions()
+    importFileName.value = ''
+    importFileText.value = ''
+    if (importFileInput.value) {
+      importFileInput.value.value = ''
+    }
+    alert(`Imported ${result.imported || 0} question(s) successfully.`)
+  } catch (error) {
+    console.error('Failed to import questions:', error)
+    alert('Error importing questions: ' + (error?.message || String(error)))
+  } finally {
+    importingQuestions.value = false
   }
 }
 
@@ -634,6 +888,12 @@ function parsePartSelection(partValue) {
   if (partValue === '1.1') return { part: 1, subPart: 1 }
   if (partValue === '1.2') return { part: 1, subPart: 2 }
   return { part: Number(partValue), subPart: 0 }
+}
+
+function parseOptionalPositiveInteger(value) {
+  if (value === null || value === undefined || value === '') return null
+  const parsed = Number(value)
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null
 }
 
 function getFileExtension(filename, fallback = 'png') {
@@ -1048,6 +1308,79 @@ watch(recordingsByAttempt, (groups) => {
   margin-bottom: 2rem;
   padding-bottom: 2rem;
   border-bottom: 1px solid rgba(148, 163, 184, 0.3);
+}
+
+.transfer-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  margin-bottom: 18px;
+}
+
+.transfer-header p {
+  margin: 8px 0 0;
+  color: #64748b;
+  font-size: 14px;
+}
+
+.transfer-count {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  padding: 4px 10px;
+  border-radius: 8px;
+  background: #e0f2fe;
+  color: #075985;
+  font-size: 13px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.transfer-actions,
+.import-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+}
+
+.transfer-actions {
+  margin-bottom: 16px;
+}
+
+.transfer-actions .add-btn {
+  border-radius: 8px;
+}
+
+.checkbox-row,
+.question-select {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: #475569;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.secondary-btn {
+  background: #334155;
+  color: white;
+  padding: 0.7rem 1rem;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  font-weight: 600;
+  transition: transform 0.2s ease, background 0.2s ease;
+}
+
+.secondary-btn:hover {
+  background: #0f172a;
+  transform: translateY(-1px);
+}
+
+.import-label {
+  width: min(360px, 100%);
 }
 
 .form-grid {

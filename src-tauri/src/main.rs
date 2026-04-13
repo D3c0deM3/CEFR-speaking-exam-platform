@@ -16,6 +16,8 @@ fn main() {
             get_audio_file,
             add_question,
             get_questions,
+            export_questions,
+            import_questions,
             delete_question,
             rate_response,
             save_image_file,
