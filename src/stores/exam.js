@@ -13,13 +13,16 @@ export const useExamStore = defineStore('exam', () => {
   const timeRemaining = ref(0)
   const isFinished = ref(false)
   const timerInterval = ref(null)
+  const startMode = ref('random')
+  const selectedQuestionsBySection = ref({})
 
-  const sections = [
+  const defaultSections = [
     { part: 1, subPart: 1, count: 3, label: '1.1', key: '1-1' },
     { part: 1, subPart: 2, count: 3, label: '1.2', key: '1-2' },
     { part: 2, subPart: 0, count: 1, label: '2', key: '2-0' },
     { part: 3, subPart: 0, count: 1, label: '3', key: '3-0' }
   ]
+  const sections = ref([...defaultSections])
   const sectionCounts = ref({})
 
   function getSectionKey(part, subPart) {
@@ -30,6 +33,47 @@ export const useExamStore = defineStore('exam', () => {
     const key = getSectionKey(part, subPart)
     sectionCounts.value = { ...sectionCounts.value, [key]: count }
   }
+
+  function resetFlowState(name) {
+    studentName.value = name
+    currentSectionIndex.value = 0
+    currentQuestion.value = 0
+    questions.value = []
+    isRecording.value = false
+    timeRemaining.value = 0
+    isFinished.value = false
+    sectionCounts.value = {}
+    stopTimer()
+  }
+
+  function sortQuestionsForExam(questionList) {
+    return [...questionList].sort((a, b) => {
+      const orderA = Number(a.pack_order) || Number.MAX_SAFE_INTEGER
+      const orderB = Number(b.pack_order) || Number.MAX_SAFE_INTEGER
+
+      if (orderA !== orderB) return orderA - orderB
+      return a.id - b.id
+    })
+  }
+
+  function buildSelectedSections(selectedQuestions) {
+    const grouped = {}
+
+    selectedQuestions.forEach((question) => {
+      const key = getSectionKey(question.part, question.sub_part)
+      grouped[key] = grouped[key] || []
+      grouped[key].push(question)
+    })
+
+    const selectedSections = defaultSections.filter((section) => grouped[section.key]?.length)
+
+    return {
+      grouped: Object.fromEntries(
+        Object.entries(grouped).map(([key, value]) => [key, sortQuestionsForExam(value)])
+      ),
+      selectedSections
+    }
+  }
   
   // Actions
   async function startExam(name) {
@@ -37,13 +81,13 @@ export const useExamStore = defineStore('exam', () => {
       // Create attempt in database
       const id = await invoke('create_attempt', { studentName: name })
       attemptId.value = id
-      studentName.value = name
-
-      currentSectionIndex.value = 0
-      currentQuestion.value = 0
+      startMode.value = 'random'
+      selectedQuestionsBySection.value = {}
+      sections.value = [...defaultSections]
+      resetFlowState(name)
 
       // Load questions for part 1.1
-      const firstSection = sections[0]
+      const firstSection = sections.value[0]
       const part1Questions = await invoke('get_random_questions', {
         part: firstSection.part,
         subPart: firstSection.subPart,
@@ -54,10 +98,36 @@ export const useExamStore = defineStore('exam', () => {
       questions.value = part1Questions
       timeRemaining.value = part1Questions[0]?.response_time || 30
       setSectionCount(firstSection.part, firstSection.subPart, part1Questions.length)
-      stopTimer()
       
     } catch (error) {
       console.error('Failed to start exam:', error)
+      throw error
+    }
+  }
+
+  async function startSelectedExam(name, selectedQuestions) {
+    if (!Array.isArray(selectedQuestions) || selectedQuestions.length === 0) {
+      throw new Error('Choose at least one question for the selected-question mode.')
+    }
+
+    const { grouped, selectedSections } = buildSelectedSections(selectedQuestions)
+
+    if (selectedSections.length === 0) {
+      throw new Error('Choose at least one valid question for the selected-question mode.')
+    }
+
+    try {
+      const id = await invoke('create_attempt', { studentName: name })
+      attemptId.value = id
+      startMode.value = 'selected'
+      selectedQuestionsBySection.value = grouped
+      sections.value = selectedSections
+      resetFlowState(name)
+
+      const firstSection = sections.value[0]
+      await loadPartQuestions(firstSection.part, grouped[firstSection.key].length, firstSection.subPart)
+    } catch (error) {
+      console.error('Failed to start selected exam:', error)
       throw error
     }
   }
@@ -89,9 +159,9 @@ export const useExamStore = defineStore('exam', () => {
     
     if (nextIndex >= questions.value.length) {
       // Move to next part
-      if (currentSectionIndex.value < sections.length - 1) {
+      if (currentSectionIndex.value < sections.value.length - 1) {
         currentSectionIndex.value += 1
-        const nextSection = sections[currentSectionIndex.value]
+        const nextSection = sections.value[currentSectionIndex.value]
         await loadPartQuestions(nextSection.part, nextSection.count, nextSection.subPart)
         currentQuestion.value = 0
       } else {
@@ -108,6 +178,17 @@ export const useExamStore = defineStore('exam', () => {
   }
   
   async function loadPartQuestions(part, count, subPart = 0) {
+    const key = getSectionKey(part, subPart)
+
+    if (startMode.value === 'selected') {
+      const selectedQuestions = selectedQuestionsBySection.value[key] || []
+
+      questions.value = selectedQuestions
+      timeRemaining.value = selectedQuestions[0]?.response_time || 30
+      setSectionCount(part, subPart, selectedQuestions.length)
+      return
+    }
+
     const excludeIds = questions.value.map(q => q.id)
     
     const newQuestions = await invoke('get_random_questions', {
@@ -169,6 +250,9 @@ export const useExamStore = defineStore('exam', () => {
     isRecording.value = false
     timeRemaining.value = 0
     isFinished.value = false
+    startMode.value = 'random'
+    selectedQuestionsBySection.value = {}
+    sections.value = [...defaultSections]
     sectionCounts.value = {}
   }
   
@@ -177,20 +261,28 @@ export const useExamStore = defineStore('exam', () => {
     return questions.value[currentQuestion.value] || null
   })
   
-  const currentPart = computed(() => sections[currentSectionIndex.value]?.part || 1)
-  const currentSubPart = computed(() => sections[currentSectionIndex.value]?.subPart || 0)
-  const currentPartLabel = computed(() => `Part ${sections[currentSectionIndex.value]?.label || '1'}`)
+  const currentPart = computed(() => sections.value[currentSectionIndex.value]?.part || 1)
+  const currentSubPart = computed(() => sections.value[currentSectionIndex.value]?.subPart || 0)
+  const currentPartLabel = computed(() => `Part ${sections.value[currentSectionIndex.value]?.label || '1'}`)
+
+  function getProgressSectionCount(section) {
+    if (startMode.value === 'selected') {
+      return selectedQuestionsBySection.value[section.key]?.length || 0
+    }
+
+    return sectionCounts.value[section.key] ?? section.count
+  }
 
   const progress = computed(() => {
-    const totalQuestions = sections.reduce((sum, section) => {
-      const count = sectionCounts.value[section.key] ?? section.count
-      return sum + count
+    const totalQuestions = sections.value.reduce((sum, section) => {
+      return sum + getProgressSectionCount(section)
     }, 0)
-    const answeredBefore = sections
+    if (totalQuestions === 0) return 0
+
+    const answeredBefore = sections.value
       .slice(0, currentSectionIndex.value)
       .reduce((sum, section) => {
-        const count = sectionCounts.value[section.key] ?? section.count
-        return sum + count
+        return sum + getProgressSectionCount(section)
       }, 0)
     const answered = answeredBefore + currentQuestion.value
 
@@ -218,6 +310,7 @@ export const useExamStore = defineStore('exam', () => {
     
     // Actions
     startExam,
+    startSelectedExam,
     nextQuestion,
     saveResponse,
     startRecording,

@@ -21,6 +21,12 @@
     >
       <div class="quick-prep-count">{{ quickPrepCount }}</div>
       <div
+        v-if="hasQuestionImage && imageUrl"
+        class="quick-prep-image"
+      >
+        <img :src="imageUrl" alt="Question visual" />
+      </div>
+      <div
         v-if="currentQuestionData?.text"
         class="quick-prep-question"
       >
@@ -33,23 +39,30 @@
         <span class="brand-sub">Mock Test</span>
       </div>
       <div class="top-center">
-        <div class="top-meta">
-          <div class="chip part-chip">{{ currentPartLabel }}</div>
-          <div class="chip question-chip">Question {{ currentQuestion + 1 }} / {{ questions.length }}</div>
-        </div>
-        <div class="timer" :class="{ warning: timeRemaining < 10 }">
-          {{ formattedTime }}
+        <div class="part-stepper" role="list" :aria-label="`${currentPartLabel} progress`">
+          <div class="stepper-line" aria-hidden="true"></div>
+          <div
+            v-for="step in progressSteps"
+            :key="step.number"
+            class="part-step"
+            :class="step.state"
+            role="listitem"
+            :aria-current="step.state === 'active' ? 'step' : undefined"
+            :aria-label="`${step.label}: ${step.state}`"
+          >
+            {{ step.number }}
+          </div>
         </div>
       </div>
-      <div class="top-right" aria-hidden="true">
-        <div class="logo-slot"></div>
+      <div class="top-right">
+        <div class="top-meta">
+          <div class="chip question-chip">Question {{ currentQuestion + 1 }} / {{ questions.length }}</div>
+          <div class="timer" :class="{ warning: timeRemaining < 10 }">
+            {{ formattedTime }}
+          </div>
+        </div>
       </div>
     </header>
-
-    <div class="progress-container">
-      <div class="progress-bar" :style="{ width: progress + '%' }"></div>
-      <div class="progress-text">{{ currentPartLabel }} - Question {{ currentQuestion + 1 }}</div>
-    </div>
 
     <template v-if="currentQuestionData">
       <main class="exam-layout">
@@ -344,6 +357,19 @@ const formattedTime = computed(() => examStore.formattedTime)
 const progress = computed(() => examStore.progress)
 const isFinished = computed(() => examStore.isFinished)
 const isPart2 = computed(() => currentPart.value === 2)
+const progressSteps = computed(() => [1, 2, 3].map(number => {
+  const state = number < currentPart.value
+    ? 'completed'
+    : number === currentPart.value
+      ? 'active'
+      : 'pending'
+
+  return {
+    number,
+    label: `Part ${number}`,
+    state
+  }
+}))
 const questionText = computed(() => (currentQuestionData.value?.text || '').trim())
 const questionLines = computed(() => {
   if (!questionText.value) return []
@@ -1086,11 +1112,32 @@ function returnToStart() {
 
 .quick-prep-count {
   font-family: 'Space Grotesk', sans-serif;
-  font-size: clamp(120px, 22vw, 240px);
+  font-size: clamp(88px, 15vw, 180px);
   font-weight: 700;
   color: #f8fafc;
   letter-spacing: 0.08em;
   text-shadow: 0 18px 40px rgba(15, 23, 42, 0.4);
+}
+
+.quick-prep-image {
+  width: min(760px, 88vw);
+  max-height: 42vh;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: 14px;
+  border-radius: 22px;
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid rgba(248, 250, 252, 0.45);
+  box-shadow: 0 24px 70px rgba(15, 23, 42, 0.32);
+}
+
+.quick-prep-image img {
+  max-width: 100%;
+  max-height: calc(42vh - 28px);
+  display: block;
+  object-fit: contain;
+  border-radius: 14px;
 }
 
 .quick-prep-question {
@@ -1139,9 +1186,9 @@ function returnToStart() {
   position: relative;
   z-index: 1;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  grid-template-columns: minmax(190px, 1fr) auto minmax(190px, 1fr);
   align-items: center;
-  gap: 16px;
+  gap: 24px;
   padding: 16px 24px;
   border-radius: 18px;
   background: rgba(255, 255, 255, 0.85);
@@ -1161,8 +1208,6 @@ function returnToStart() {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 16px;
-  flex-wrap: wrap;
 }
 
 .top-right {
@@ -1170,11 +1215,6 @@ function returnToStart() {
   align-items: center;
   justify-content: flex-end;
   min-height: 40px;
-}
-
-.logo-slot {
-  min-width: 64px;
-  min-height: 32px;
 }
 
 .brand-title {
@@ -1193,9 +1233,10 @@ function returnToStart() {
 
 .top-meta {
   display: flex;
-  gap: 10px;
-  justify-content: center;
-  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px;
+  justify-content: flex-end;
+  flex-wrap: nowrap;
 }
 
 .chip {
@@ -1206,10 +1247,6 @@ function returnToStart() {
   letter-spacing: 0.02em;
   background: #0f172a;
   color: #f8fafc;
-}
-
-.part-chip {
-  background: #f97316;
 }
 
 .question-chip {
@@ -1225,6 +1262,7 @@ function returnToStart() {
   border-radius: 12px;
   background: #fef3c7;
   border: 1px solid rgba(124, 45, 18, 0.1);
+  white-space: nowrap;
 }
 
 .timer.warning {
@@ -1238,31 +1276,60 @@ function returnToStart() {
   50% { transform: scale(1.02); }
 }
 
-.progress-container {
+.part-stepper {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 220px;
+  min-height: 50px;
+}
+
+.stepper-line {
+  position: absolute;
+  left: 25px;
+  right: 25px;
+  top: 50%;
+  height: 13px;
+  border-radius: 999px;
+  background: #55bdc1;
+  box-shadow:
+    inset 0 2px 4px rgba(255, 255, 255, 0.35),
+    0 2px 4px rgba(15, 23, 42, 0.18);
+  transform: translateY(-50%);
+}
+
+.part-step {
   position: relative;
   z-index: 1;
-  height: 10px;
-  background: rgba(15, 23, 42, 0.1);
-  border-radius: 999px;
-  margin: 26px 0 34px;
-  overflow: hidden;
+  width: 50px;
+  height: 50px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: #55bdc1;
+  border: 1px solid rgba(21, 94, 117, 0.14);
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 25px;
+  font-weight: 500;
+  line-height: 1;
+  text-shadow: 0 1px 2px rgba(15, 23, 42, 0.24);
+  box-shadow:
+    inset 0 2px 4px rgba(255, 255, 255, 0.24),
+    0 2px 5px rgba(15, 23, 42, 0.24);
+  transition: background 0.25s ease, box-shadow 0.25s ease, transform 0.25s ease;
 }
 
-.progress-bar {
-  height: 100%;
-  background: linear-gradient(90deg, #22c55e, #16a34a);
-  transition: width 0.3s ease;
+.part-step.active,
+.part-step.completed {
+  background: #48a72f;
+  box-shadow:
+    inset 0 2px 4px rgba(255, 255, 255, 0.24),
+    0 2px 5px rgba(15, 23, 42, 0.24);
 }
 
-.progress-text {
-  position: absolute;
-  top: 14px;
-  left: 0;
-  right: 0;
-  text-align: center;
-  font-size: 13px;
-  font-weight: 600;
-  color: #475569;
+.part-step.active {
+  transform: scale(1.02);
 }
 
 .exam-layout {
@@ -1692,18 +1759,20 @@ function returnToStart() {
   .exam-topbar {
     grid-template-columns: 1fr;
     text-align: center;
+    gap: 14px;
   }
 
-  .top-center {
-    flex-direction: column;
+  .brand {
+    align-items: center;
   }
 
   .top-right {
-    display: none;
+    justify-content: center;
   }
 
   .top-meta {
     justify-content: center;
+    flex-wrap: wrap;
   }
 
   .timer {
@@ -1726,6 +1795,23 @@ function returnToStart() {
 
   .exam-topbar {
     padding: 16px;
+  }
+
+  .part-stepper {
+    width: 190px;
+    min-height: 44px;
+  }
+
+  .stepper-line {
+    left: 22px;
+    right: 22px;
+    height: 11px;
+  }
+
+  .part-step {
+    width: 44px;
+    height: 44px;
+    font-size: 22px;
   }
 
   .question-card,
