@@ -4,7 +4,7 @@
       <div class="entry-info">
         <span class="eyebrow">CEFR Speaking</span>
         <h1>CEFR Speaking Mock Test</h1>
-        <p class="subtitle">Enter your full name, then start a random mock test or choose the exact questions you want.</p>
+        <p class="subtitle">Enter your full name, then start a random mock test or choose a saved full test.</p>
         <div class="instruction-list">
           <div class="instruction-item">
             <span class="bullet"></span>
@@ -12,7 +12,7 @@
           </div>
           <div class="instruction-item">
             <span class="bullet"></span>
-            <span>Choose Questions mode lets you include only selected prompts</span>
+            <span>Choose Test mode starts one complete admin-created test</span>
           </div>
           <div class="instruction-item">
             <span class="bullet"></span>
@@ -45,7 +45,7 @@
             :class="{ active: examMode === 'selected' }"
             @click="examMode = 'selected'"
           >
-            Choose Questions
+            Choose Test
           </button>
         </div>
 
@@ -64,62 +64,47 @@
         <div v-if="examMode === 'selected'" class="question-picker">
           <div class="picker-header">
             <div>
-              <span class="picker-eyebrow">Selected Mode</span>
-              <h3>Choose existing questions</h3>
+              <span class="picker-eyebrow">Saved Tests</span>
+              <h3>Choose a full test</h3>
             </div>
-            <span class="selection-count">{{ selectedQuestionIds.length }} selected</span>
+            <span class="selection-count">{{ fullTests.length }} available</span>
           </div>
 
-          <div v-if="isLoadingQuestions" class="picker-message">
-            Loading questions...
+          <div v-if="isLoadingTests" class="picker-message">
+            Loading tests...
           </div>
-          <div v-else-if="questionLoadError" class="picker-message error">
-            {{ questionLoadError }}
+          <div v-else-if="testLoadError" class="picker-message error">
+            {{ testLoadError }}
           </div>
-          <div v-else-if="availableQuestions.length === 0" class="picker-message">
-            No active questions found. Add questions in the admin dashboard first.
+          <div v-else-if="fullTests.length === 0" class="picker-message">
+            No full tests found. Create a full test in the admin dashboard first.
           </div>
-          <div v-else class="picker-groups">
-            <section
-              v-for="group in groupedQuestions"
-              :key="group.key"
-              class="picker-group"
+          <div v-else class="test-list">
+            <label
+              v-for="test in fullTests"
+              :key="test.id"
+              class="test-option"
+              :class="{ selected: selectedFullTestId === test.id }"
             >
-              <div class="group-header">
-                <h4>{{ group.label }}</h4>
-                <button
-                  type="button"
-                  class="mini-action"
-                  @click="toggleGroup(group.questions)"
-                >
-                  {{ isGroupSelected(group.questions) ? 'Clear' : 'Select all' }}
-                </button>
+              <input
+                type="radio"
+                name="full-test"
+                :value="test.id"
+                v-model="selectedFullTestId"
+              />
+              <div class="test-copy">
+                <strong>{{ test.name }}</strong>
+                <span>{{ test.questions.length }} question(s)</span>
+                <small>
+                  <span
+                    v-for="section in sectionOrder"
+                    :key="section.key"
+                  >
+                    {{ section.label }}: {{ getTestSectionCount(test, section) }}
+                  </span>
+                </small>
               </div>
-
-              <label
-                v-for="question in group.questions"
-                :key="question.id"
-                class="question-option"
-                :class="{ selected: isQuestionSelected(question.id) }"
-              >
-                <input
-                  type="checkbox"
-                  :checked="isQuestionSelected(question.id)"
-                  @change="toggleQuestion(question.id, $event.target.checked)"
-                />
-                <span class="question-copy">
-                  <strong>ID {{ question.id }}</strong>
-                  <span>{{ describeQuestion(question) }}</span>
-                  <small>
-                    {{ question.response_time }}s
-                    <template v-if="question.pack_id"> - Pack {{ question.pack_id }}</template>
-                    <template v-if="question.pack_order"> - Order {{ question.pack_order }}</template>
-                    <template v-if="question.audio_path"> - Audio</template>
-                    <template v-if="question.image_path"> - Image</template>
-                  </small>
-                </span>
-              </label>
-            </section>
+            </label>
           </div>
         </div>
 
@@ -146,10 +131,10 @@ const router = useRouter()
 const examStore = useExamStore()
 const isLoading = ref(false)
 const examMode = ref('random')
-const availableQuestions = ref([])
-const selectedQuestionIds = ref([])
-const isLoadingQuestions = ref(false)
-const questionLoadError = ref('')
+const fullTests = ref([])
+const selectedFullTestId = ref(null)
+const isLoadingTests = ref(false)
+const testLoadError = ref('')
 
 const sectionOrder = [
   { key: '1-1', label: 'Part 1.1', part: 1, subPart: 1 },
@@ -158,74 +143,67 @@ const sectionOrder = [
   { key: '3-0', label: 'Part 3', part: 3, subPart: 0 }
 ]
 
-const selectedQuestions = computed(() => {
-  const selectedIds = new Set(selectedQuestionIds.value)
-  return availableQuestions.value.filter(question => selectedIds.has(question.id))
-})
-
-const groupedQuestions = computed(() => {
-  return sectionOrder
-    .map((section) => ({
-      ...section,
-      questions: availableQuestions.value
-        .filter(question => question.part === section.part && question.sub_part === section.subPart)
-        .sort(sortQuestionForPicker)
-    }))
-    .filter(group => group.questions.length > 0)
+const selectedFullTest = computed(() => {
+  return fullTests.value.find(test => test.id === selectedFullTestId.value) || null
 })
 
 const isStartDisabled = computed(() => {
   if (!studentName.value.trim() || isLoading.value) return true
   if (examMode.value === 'selected') {
-    return isLoadingQuestions.value || selectedQuestionIds.value.length === 0
+    return isLoadingTests.value || !selectedFullTest.value
   }
   return false
 })
 
 const startButtonLabel = computed(() => {
   if (isLoading.value) return 'Starting Exam...'
-  if (examMode.value === 'selected') return `Start Selected Test (${selectedQuestionIds.value.length})`
+  if (examMode.value === 'selected') {
+    return selectedFullTest.value
+      ? `Start ${selectedFullTest.value.name}`
+      : 'Start Selected Test'
+  }
   return 'Start Random Test'
 })
 
 onMounted(() => {
-  loadQuestions()
+  loadFullTests()
 })
 
 watch(examMode, (value) => {
-  if (value === 'selected' && availableQuestions.value.length === 0 && !isLoadingQuestions.value) {
-    loadQuestions()
+  if (value === 'selected' && fullTests.value.length === 0 && !isLoadingTests.value) {
+    loadFullTests()
   }
 })
 
-async function loadQuestions() {
-  isLoadingQuestions.value = true
-  questionLoadError.value = ''
+async function loadFullTests() {
+  isLoadingTests.value = true
+  testLoadError.value = ''
 
   try {
-    const data = await invoke('get_questions')
-    availableQuestions.value = data || []
-    const activeIds = new Set(availableQuestions.value.map(question => question.id))
-    selectedQuestionIds.value = selectedQuestionIds.value.filter(id => activeIds.has(id))
+    const data = await invoke('get_full_tests')
+    fullTests.value = (data || []).filter(isCompleteFullTest)
+    if (!fullTests.value.some(test => test.id === selectedFullTestId.value)) {
+      selectedFullTestId.value = fullTests.value[0]?.id || null
+    }
   } catch (error) {
-    console.error('Failed to load questions:', error)
-    questionLoadError.value = 'Could not load questions. Please try again or use random mode.'
+    console.error('Failed to load full tests:', error)
+    testLoadError.value = 'Could not load tests. Please try again or use random mode.'
   } finally {
-    isLoadingQuestions.value = false
+    isLoadingTests.value = false
   }
 }
 
 async function startExam() {
   if (!studentName.value.trim()) return
-  if (examMode.value === 'selected' && selectedQuestions.value.length === 0) {
-    alert('Choose at least one question before starting selected mode.')
+  if (examMode.value === 'selected' && !selectedFullTest.value) {
+    alert('Choose a full test before starting selected mode.')
     return
   }
 
   isLoading.value = true
   try {
     if (examMode.value === 'selected') {
-      await examStore.startSelectedExam(studentName.value.trim(), selectedQuestions.value)
+      await examStore.startSelectedExam(studentName.value.trim(), selectedFullTest.value.questions)
     } else {
       await examStore.startExam(studentName.value.trim())
     }
@@ -238,50 +216,14 @@ async function startExam() {
   }
 }
 
-function sortQuestionForPicker(a, b) {
-  const orderA = Number(a.pack_order) || Number.MAX_SAFE_INTEGER
-  const orderB = Number(b.pack_order) || Number.MAX_SAFE_INTEGER
-
-  if (orderA !== orderB) return orderA - orderB
-  return a.id - b.id
+function getTestSectionCount(test, section) {
+  return (test.questions || []).filter((question) => (
+    question.part === section.part && question.sub_part === section.subPart
+  )).length
 }
 
-function isQuestionSelected(questionId) {
-  return selectedQuestionIds.value.includes(questionId)
-}
-
-function toggleQuestion(questionId, isSelected) {
-  if (isSelected) {
-    if (!selectedQuestionIds.value.includes(questionId)) {
-      selectedQuestionIds.value = [...selectedQuestionIds.value, questionId]
-    }
-    return
-  }
-
-  selectedQuestionIds.value = selectedQuestionIds.value.filter(id => id !== questionId)
-}
-
-function isGroupSelected(questions) {
-  return questions.every(question => selectedQuestionIds.value.includes(question.id))
-}
-
-function toggleGroup(questions) {
-  const groupIds = questions.map(question => question.id)
-
-  if (isGroupSelected(questions)) {
-    selectedQuestionIds.value = selectedQuestionIds.value.filter(id => !groupIds.includes(id))
-    return
-  }
-
-  selectedQuestionIds.value = [...new Set([...selectedQuestionIds.value, ...groupIds])]
-}
-
-function describeQuestion(question) {
-  const text = question.text?.trim()
-  if (text) return text
-  if (question.image_path) return 'Image prompt'
-  if (question.audio_path) return 'Audio prompt'
-  return 'Untitled question'
+function isCompleteFullTest(test) {
+  return sectionOrder.every(section => getTestSectionCount(test, section) > 0)
 }
 </script>
 
@@ -515,6 +457,67 @@ function describeQuestion(question) {
   max-height: min(44vh, 420px);
   overflow-y: auto;
   padding-right: 4px;
+}
+
+.test-list {
+  display: grid;
+  gap: 12px;
+  max-height: min(44vh, 420px);
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.test-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 14px;
+  border-radius: 14px;
+  background: #ffffff;
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  cursor: pointer;
+  transition: border-color 0.2s ease, background 0.2s ease, transform 0.2s ease;
+}
+
+.test-option.selected {
+  background: #eff6ff;
+  border-color: rgba(29, 78, 216, 0.38);
+}
+
+.test-option:hover {
+  transform: translateY(-1px);
+  border-color: rgba(249, 115, 22, 0.45);
+}
+
+.test-option input {
+  margin-top: 4px;
+  accent-color: var(--accent-deep);
+}
+
+.test-copy {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+}
+
+.test-copy strong {
+  color: #0f172a;
+  font-size: 15px;
+}
+
+.test-copy span {
+  color: #334155;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.test-copy small {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 600;
 }
 
 .picker-group {

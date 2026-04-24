@@ -1,13 +1,13 @@
 use base64::{engine::general_purpose, Engine as _};
-use serde::{Deserialize, Serialize};
-use rusqlite::{Connection, params, OptionalExtension};
-use tauri::{AppHandle, Manager};
 use rand::{distributions::Alphanumeric, Rng};
 use reqwest::multipart::{Form, Part};
+use rusqlite::{params, Connection, OptionalExtension};
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use tauri::{AppHandle, Manager};
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Question {
@@ -21,6 +21,14 @@ pub struct Question {
     pub pack_order: i32,
     pub response_time: i32,
     pub active: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct FullTest {
+    pub id: i64,
+    pub name: String,
+    pub created_at: String,
+    pub questions: Vec<Question>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -102,7 +110,9 @@ struct TelegramApiResponse {
 
 // Initialize database connection
 fn init_db(app_handle: &AppHandle) -> Result<Connection, String> {
-    let app_dir = app_handle.path().app_data_dir()
+    let app_dir = app_handle
+        .path()
+        .app_data_dir()
         .map_err(|e| format!("Failed to get app data directory: {}", e))?;
 
     fs::create_dir_all(&app_dir).map_err(|e| e.to_string())?;
@@ -156,24 +166,53 @@ fn init_db(app_handle: &AppHandle) -> Result<Connection, String> {
         CREATE TABLE IF NOT EXISTS app_settings (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL DEFAULT ''
-        );"
-    ).map_err(|e| e.to_string())?;
+        );
+
+        CREATE TABLE IF NOT EXISTS full_tests (
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            active BOOLEAN DEFAULT 1
+        );
+
+        CREATE TABLE IF NOT EXISTS full_test_questions (
+            full_test_id INTEGER NOT NULL,
+            question_id INTEGER NOT NULL,
+            position INTEGER NOT NULL,
+            PRIMARY KEY (full_test_id, question_id),
+            FOREIGN KEY (full_test_id) REFERENCES full_tests (id),
+            FOREIGN KEY (question_id) REFERENCES questions (id)
+        );",
+    )
+    .map_err(|e| e.to_string())?;
 
     ensure_column(&conn, "questions", "sub_part", "INTEGER NOT NULL DEFAULT 0")?;
     ensure_column(&conn, "questions", "image_path", "TEXT NOT NULL DEFAULT ''")?;
     ensure_column(&conn, "questions", "text", "TEXT NOT NULL DEFAULT ''")?;
     ensure_column(&conn, "questions", "pack_id", "TEXT NOT NULL DEFAULT ''")?;
-    ensure_column(&conn, "questions", "pack_order", "INTEGER NOT NULL DEFAULT 0")?;
+    ensure_column(
+        &conn,
+        "questions",
+        "pack_order",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
     conn.execute(
         "UPDATE questions SET sub_part = 1 WHERE part = 1 AND sub_part = 0",
         [],
-    ).map_err(|e| e.to_string())?;
+    )
+    .map_err(|e| e.to_string())?;
 
     Ok(conn)
 }
 
-fn ensure_column(conn: &Connection, table: &str, column: &str, column_def: &str) -> Result<(), String> {
-    let mut stmt = conn.prepare(&format!("PRAGMA table_info({})", table))
+fn ensure_column(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    column_def: &str,
+) -> Result<(), String> {
+    let mut stmt = conn
+        .prepare(&format!("PRAGMA table_info({})", table))
         .map_err(|e| e.to_string())?;
     let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
 
@@ -187,7 +226,8 @@ fn ensure_column(conn: &Connection, table: &str, column: &str, column_def: &str)
     conn.execute(
         &format!("ALTER TABLE {} ADD COLUMN {} {}", table, column, column_def),
         [],
-    ).map_err(|e| e.to_string())?;
+    )
+    .map_err(|e| e.to_string())?;
 
     Ok(())
 }
@@ -224,6 +264,81 @@ fn unique_filename(dir: &Path, filename: &str) -> Result<String, String> {
     }
 
     Err("Failed to generate unique filename".to_string())
+}
+
+fn question_from_row(row: &rusqlite::Row) -> rusqlite::Result<Question> {
+    Ok(Question {
+        id: row.get(0)?,
+        part: row.get(1)?,
+        sub_part: row.get(2)?,
+        audio_path: row.get(3)?,
+        image_path: row.get(4)?,
+        text: row.get(5)?,
+        pack_id: row.get(6)?,
+        pack_order: row.get(7)?,
+        response_time: row.get(8)?,
+        active: row.get(9)?,
+    })
+}
+
+fn section_label(part: i32, sub_part: i32) -> String {
+    if part == 1 && sub_part == 1 {
+        return "Part 1.1".to_string();
+    }
+    if part == 1 && sub_part == 2 {
+        return "Part 1.2".to_string();
+    }
+    format!("Part {}", part)
+}
+
+fn validate_full_test_questions(
+    conn: &Connection,
+    question_ids: &[i64],
+) -> Result<Vec<Question>, String> {
+    if question_ids.is_empty() {
+        return Err("Choose at least one question for the full test".to_string());
+    }
+
+    let mut seen_ids = HashSet::new();
+    let mut questions = Vec::new();
+
+    for question_id in question_ids {
+        if !seen_ids.insert(*question_id) {
+            return Err(format!(
+                "Question {} was selected more than once",
+                question_id
+            ));
+        }
+
+        let question = conn
+            .query_row(
+                "SELECT id, part, sub_part, audio_path, image_path, text, pack_id, pack_order, response_time, active
+                 FROM questions WHERE id = ? AND active = 1",
+                params![question_id],
+                question_from_row,
+            )
+            .optional()
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Question {} does not exist or is inactive", question_id))?;
+
+        questions.push(question);
+    }
+
+    let required_sections = [(1, 1), (1, 2), (2, 0), (3, 0)];
+    for (part, sub_part) in required_sections {
+        let exists = questions
+            .iter()
+            .any(|question| question.part == part && question.sub_part == sub_part);
+
+        if !exists {
+            return Err(format!(
+                "A full test must include at least one {} question",
+                section_label(part, sub_part)
+            ));
+        }
+    }
+
+    Ok(questions)
 }
 
 fn telegram_bot_token() -> String {
@@ -309,8 +424,8 @@ fn stored_telegram_chat_ids(conn: &Connection) -> Result<Option<Vec<String>>, St
 }
 
 fn persist_telegram_chat_ids(conn: &Connection, chat_ids: &[String]) -> Result<(), String> {
-    let serialized_ids =
-        serde_json::to_string(chat_ids).map_err(|e| format!("Failed to serialize chat IDs: {}", e))?;
+    let serialized_ids = serde_json::to_string(chat_ids)
+        .map_err(|e| format!("Failed to serialize chat IDs: {}", e))?;
     let primary_chat_id = chat_ids
         .first()
         .map(|value| value.as_str())
@@ -336,7 +451,10 @@ fn persist_telegram_chat_ids(conn: &Connection, chat_ids: &[String]) -> Result<(
 fn load_telegram_chat_ids(conn: &Connection) -> Result<Vec<String>, String> {
     if let Some(chat_ids) = stored_telegram_chat_ids(conn)? {
         if chat_ids.is_empty() {
-            return Err("Telegram chat IDs are not configured. Add at least one in Admin Dashboard.".to_string());
+            return Err(
+                "Telegram chat IDs are not configured. Add at least one in Admin Dashboard."
+                    .to_string(),
+            );
         }
         return Ok(chat_ids);
     }
@@ -405,8 +523,19 @@ fn resolve_question_asset_path(
             candidates.push(resource_dir.join(trimmed));
             candidates.push(resource_dir.join("audio").join(trimmed));
             candidates.push(resource_dir.join("instruction_sounds").join(trimmed));
-            candidates.push(resource_dir.join("_up_").join("instruction_sounds").join(trimmed));
-            candidates.push(resource_dir.join("_up_").join("src").join("instruction_sounds").join(trimmed));
+            candidates.push(
+                resource_dir
+                    .join("_up_")
+                    .join("instruction_sounds")
+                    .join(trimmed),
+            );
+            candidates.push(
+                resource_dir
+                    .join("_up_")
+                    .join("src")
+                    .join("instruction_sounds")
+                    .join(trimmed),
+            );
         }
 
         candidates.push(
@@ -470,10 +599,19 @@ fn write_imported_asset(
     let safe_filename = unique_filename(&target_dir, &asset.filename)?;
     let data = general_purpose::STANDARD
         .decode(&asset.data_base64)
-        .map_err(|e| format!("Failed to decode imported {} file {}: {}", folder, asset.filename, e))?;
+        .map_err(|e| {
+            format!(
+                "Failed to decode imported {} file {}: {}",
+                folder, asset.filename, e
+            )
+        })?;
 
-    fs::write(target_dir.join(&safe_filename), data)
-        .map_err(|e| format!("Failed to write imported {} file {}: {}", folder, safe_filename, e))?;
+    fs::write(target_dir.join(&safe_filename), data).map_err(|e| {
+        format!(
+            "Failed to write imported {} file {}: {}",
+            folder, safe_filename, e
+        )
+    })?;
 
     Ok(safe_filename)
 }
@@ -617,8 +755,8 @@ async fn send_telegram_photo(
     image_path: &Path,
     caption: &str,
 ) -> Result<(), String> {
-    let image_data =
-        fs::read(image_path).map_err(|e| format!("Failed to read image file for Telegram: {}", e))?;
+    let image_data = fs::read(image_path)
+        .map_err(|e| format!("Failed to read image file for Telegram: {}", e))?;
     let image_name = image_path
         .file_name()
         .and_then(|name| name.to_str())
@@ -724,10 +862,8 @@ async fn send_response_to_telegram(
 
     if let Some(resolved_image_path) = resolve_image_path(app_dir, image_path) {
         if resolved_image_path.exists() {
-            let image_caption = format!(
-                "Prompt image for {} (Question {})",
-                part_label, question_id
-            );
+            let image_caption =
+                format!("Prompt image for {} (Question {})", part_label, question_id);
             send_telegram_photo(
                 &client,
                 &bot_token,
@@ -795,21 +931,19 @@ async fn send_response_to_telegram(
 }
 
 #[tauri::command]
-pub async fn get_telegram_chat_id(
-    app_handle: AppHandle,
-) -> Result<String, String> {
+pub async fn get_telegram_chat_id(app_handle: AppHandle) -> Result<String, String> {
     let conn = init_db(&app_handle)?;
     if let Some(chat_ids) = stored_telegram_chat_ids(&conn)? {
         return Ok(chat_ids.into_iter().next().unwrap_or_default());
     }
-    Ok(env_telegram_chat_ids().into_iter().next().unwrap_or_default())
+    Ok(env_telegram_chat_ids()
+        .into_iter()
+        .next()
+        .unwrap_or_default())
 }
 
 #[tauri::command]
-pub async fn set_telegram_chat_id(
-    app_handle: AppHandle,
-    chat_id: String,
-) -> Result<(), String> {
+pub async fn set_telegram_chat_id(app_handle: AppHandle, chat_id: String) -> Result<(), String> {
     let trimmed = chat_id.trim();
     if trimmed.is_empty() {
         return Err("Telegram chat ID cannot be empty".to_string());
@@ -822,9 +956,7 @@ pub async fn set_telegram_chat_id(
 }
 
 #[tauri::command]
-pub async fn get_telegram_chat_ids(
-    app_handle: AppHandle,
-) -> Result<Vec<String>, String> {
+pub async fn get_telegram_chat_ids(app_handle: AppHandle) -> Result<Vec<String>, String> {
     let conn = init_db(&app_handle)?;
     if let Some(chat_ids) = stored_telegram_chat_ids(&conn)? {
         return Ok(chat_ids);
@@ -845,16 +977,14 @@ pub async fn set_telegram_chat_ids(
 }
 
 #[tauri::command]
-pub async fn create_attempt(
-    app_handle: AppHandle,
-    student_name: String,
-) -> Result<i64, String> {
+pub async fn create_attempt(app_handle: AppHandle, student_name: String) -> Result<i64, String> {
     let conn = init_db(&app_handle)?;
 
     conn.execute(
         "INSERT INTO attempts (student_name) VALUES (?)",
         params![student_name],
-    ).map_err(|e| e.to_string())?;
+    )
+    .map_err(|e| e.to_string())?;
 
     Ok(conn.last_insert_rowid())
 }
@@ -926,7 +1056,8 @@ pub async fn get_random_questions(
     let exclude_clause = if exclude_ids.is_empty() {
         "".to_string()
     } else {
-        let ids_str = exclude_ids.iter()
+        let ids_str = exclude_ids
+            .iter()
             .map(|id| id.to_string())
             .collect::<Vec<_>>()
             .join(",");
@@ -972,13 +1103,20 @@ pub async fn save_response(
 ) -> Result<String, String> {
     // Get student name for folder structure
     let conn = init_db(&app_handle)?;
-    let student_name: String = conn.query_row(
-        "SELECT student_name FROM attempts WHERE id = ?",
-        params![attempt_id],
-        |row| row.get(0),
-    ).map_err(|e| e.to_string())?;
-    let (question_part, question_sub_part, question_text, question_image_path): (i32, i32, String, String) =
-        conn.query_row(
+    let student_name: String = conn
+        .query_row(
+            "SELECT student_name FROM attempts WHERE id = ?",
+            params![attempt_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    let (question_part, question_sub_part, question_text, question_image_path): (
+        i32,
+        i32,
+        String,
+        String,
+    ) = conn
+        .query_row(
             "SELECT part, sub_part, text, image_path FROM questions WHERE id = ?",
             params![question_id],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
@@ -986,18 +1124,19 @@ pub async fn save_response(
         .map_err(|e| e.to_string())?;
 
     // Create directory structure: responses/{date}/{student_name}/
-    let app_dir = app_handle.path().app_data_dir()
+    let app_dir = app_handle
+        .path()
+        .app_data_dir()
         .map_err(|e| format!("Failed to get app data directory: {}", e))?;
 
     let date = chrono::Local::now().format("%Y-%m-%d").to_string();
-    let safe_name = student_name.replace(" ", "_")
+    let safe_name = student_name
+        .replace(" ", "_")
         .replace("/", "_")
         .replace("\\", "_")
         .replace(":", "_");
 
-    let dir = app_dir.join("responses")
-        .join(&date)
-        .join(&safe_name);
+    let dir = app_dir.join("responses").join(&date).join(&safe_name);
 
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
 
@@ -1013,7 +1152,8 @@ pub async fn save_response(
         "INSERT INTO responses (attempt_id, question_id, audio_path, duration)
          VALUES (?, ?, ?, ?)",
         params![attempt_id, question_id, filepath_str, duration],
-    ).map_err(|e| e.to_string())?;
+    )
+    .map_err(|e| e.to_string())?;
 
     let target_chat_ids = load_telegram_chat_ids(&conn)?;
     let mut send_errors = Vec::new();
@@ -1049,24 +1189,20 @@ pub async fn save_response(
 }
 
 #[tauri::command]
-pub async fn finish_attempt(
-    app_handle: AppHandle,
-    attempt_id: i64,
-) -> Result<(), String> {
+pub async fn finish_attempt(app_handle: AppHandle, attempt_id: i64) -> Result<(), String> {
     let conn = init_db(&app_handle)?;
 
     conn.execute(
         "UPDATE attempts SET finished_at = CURRENT_TIMESTAMP WHERE id = ?",
         params![attempt_id],
-    ).map_err(|e| e.to_string())?;
+    )
+    .map_err(|e| e.to_string())?;
 
     Ok(())
 }
 
 #[tauri::command]
-pub async fn get_attempts(
-    app_handle: AppHandle,
-) -> Result<Vec<Attempt>, String> {
+pub async fn get_attempts(app_handle: AppHandle) -> Result<Vec<Attempt>, String> {
     let conn = init_db(&app_handle)?;
 
     let mut stmt = conn.prepare(
@@ -1095,7 +1231,9 @@ pub async fn save_audio_file(
     filename: String,
     audio_data: Vec<u8>,
 ) -> Result<String, String> {
-    let app_dir = app_handle.path().app_data_dir()
+    let app_dir = app_handle
+        .path()
+        .app_data_dir()
         .map_err(|e| format!("Failed to get app data directory: {}", e))?;
 
     fs::create_dir_all(&app_dir).map_err(|e| e.to_string())?;
@@ -1105,7 +1243,11 @@ pub async fn save_audio_file(
 
     let safe_filename = unique_filename(&audio_dir, &filename)?;
     let audio_file_path = audio_dir.join(&safe_filename);
-    println!("Saving audio file to: {:?}, size: {} bytes", audio_file_path, audio_data.len());
+    println!(
+        "Saving audio file to: {:?}, size: {} bytes",
+        audio_file_path,
+        audio_data.len()
+    );
 
     fs::write(&audio_file_path, &audio_data).map_err(|e| {
         let err_msg = format!("Failed to write audio file: {}", e);
@@ -1118,11 +1260,10 @@ pub async fn save_audio_file(
 }
 
 #[tauri::command]
-pub async fn get_audio_file(
-    app_handle: AppHandle,
-    filename: String,
-) -> Result<Vec<u8>, String> {
-    let app_dir = app_handle.path().app_data_dir()
+pub async fn get_audio_file(app_handle: AppHandle, filename: String) -> Result<Vec<u8>, String> {
+    let app_dir = app_handle
+        .path()
+        .app_data_dir()
         .map_err(|e| format!("Failed to get app data directory: {}", e))?;
 
     let mut candidates = Vec::new();
@@ -1132,8 +1273,19 @@ pub async fn get_audio_file(
         candidates.push(resource_dir.join(&filename));
         candidates.push(resource_dir.join("audio").join(&filename));
         candidates.push(resource_dir.join("instruction_sounds").join(&filename));
-        candidates.push(resource_dir.join("_up_").join("instruction_sounds").join(&filename));
-        candidates.push(resource_dir.join("_up_").join("src").join("instruction_sounds").join(&filename));
+        candidates.push(
+            resource_dir
+                .join("_up_")
+                .join("instruction_sounds")
+                .join(&filename),
+        );
+        candidates.push(
+            resource_dir
+                .join("_up_")
+                .join("src")
+                .join("instruction_sounds")
+                .join(&filename),
+        );
     }
 
     let dev_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -1148,12 +1300,11 @@ pub async fn get_audio_file(
             continue;
         }
         println!("Reading audio file from: {:?}", path);
-        let data = fs::read(&path)
-            .map_err(|e| {
-                let err_msg = format!("Failed to read audio file {}: {}", filename, e);
-                println!("Error: {}", err_msg);
-                err_msg
-            })?;
+        let data = fs::read(&path).map_err(|e| {
+            let err_msg = format!("Failed to read audio file {}: {}", filename, e);
+            println!("Error: {}", err_msg);
+            err_msg
+        })?;
         println!("Audio file read successfully: {} bytes", data.len());
         return Ok(data);
     }
@@ -1180,7 +1331,11 @@ pub async fn add_question(
     // Use empty string if no audio path provided
     let audio = audio_path.unwrap_or_default();
     let image = image_path.unwrap_or_default();
-    let question_text = if part == 3 { String::new() } else { text.unwrap_or_default() };
+    let question_text = if part == 3 {
+        String::new()
+    } else {
+        text.unwrap_or_default()
+    };
     let sub_part_value = sub_part.unwrap_or(0);
     let pack_id_value = pack_id.unwrap_or_default();
     let pack_order_value = pack_order.unwrap_or(0);
@@ -1198,7 +1353,9 @@ pub async fn add_question(
             return Err("Test pack ID is required for Part 1.1 and Part 1.2 questions".to_string());
         }
         if pack_order_value <= 0 {
-            return Err("Question order is required for Part 1.1 and Part 1.2 questions".to_string());
+            return Err(
+                "Question order is required for Part 1.1 and Part 1.2 questions".to_string(),
+            );
         }
     }
 
@@ -1212,9 +1369,7 @@ pub async fn add_question(
 }
 
 #[tauri::command]
-pub async fn get_questions(
-    app_handle: AppHandle,
-) -> Result<Vec<Question>, String> {
+pub async fn get_questions(app_handle: AppHandle) -> Result<Vec<Question>, String> {
     let conn = init_db(&app_handle)?;
 
     let mut stmt = conn.prepare(
@@ -1245,6 +1400,117 @@ pub async fn get_questions(
 }
 
 #[tauri::command]
+pub async fn create_full_test(
+    app_handle: AppHandle,
+    name: String,
+    question_ids: Vec<i64>,
+) -> Result<i64, String> {
+    let trimmed_name = name.trim();
+    if trimmed_name.is_empty() {
+        return Err("Full test name cannot be empty".to_string());
+    }
+
+    let conn = init_db(&app_handle)?;
+    validate_full_test_questions(&conn, &question_ids)?;
+
+    conn.execute(
+        "INSERT INTO full_tests (name, active) VALUES (?, 1)",
+        params![trimmed_name],
+    )
+    .map_err(|e| e.to_string())?;
+
+    let full_test_id = conn.last_insert_rowid();
+    for (index, question_id) in question_ids.iter().enumerate() {
+        conn.execute(
+            "INSERT INTO full_test_questions (full_test_id, question_id, position)
+             VALUES (?, ?, ?)",
+            params![full_test_id, question_id, (index as i32) + 1],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    Ok(full_test_id)
+}
+
+#[tauri::command]
+pub async fn get_full_tests(app_handle: AppHandle) -> Result<Vec<FullTest>, String> {
+    let conn = init_db(&app_handle)?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, name, created_at
+             FROM full_tests
+             WHERE active = 1
+             ORDER BY created_at DESC, id DESC",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let test_rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+
+    let mut tests = Vec::new();
+    for row in test_rows {
+        let (id, name, created_at) = row.map_err(|e| e.to_string())?;
+        let mut question_stmt = conn
+            .prepare(
+                "SELECT questions.id,
+                        questions.part,
+                        questions.sub_part,
+                        questions.audio_path,
+                        questions.image_path,
+                        questions.text,
+                        questions.pack_id,
+                        questions.pack_order,
+                        questions.response_time,
+                        questions.active
+                 FROM full_test_questions
+                 JOIN questions ON full_test_questions.question_id = questions.id
+                 WHERE full_test_questions.full_test_id = ? AND questions.active = 1
+                 ORDER BY questions.part ASC,
+                          questions.sub_part ASC,
+                          CASE WHEN questions.pack_order > 0 THEN questions.pack_order ELSE 999999 END ASC,
+                          full_test_questions.position ASC,
+                          questions.id ASC",
+            )
+            .map_err(|e| e.to_string())?;
+
+        let questions = question_stmt
+            .query_map(params![id], question_from_row)
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+
+        tests.push(FullTest {
+            id,
+            name,
+            created_at,
+            questions,
+        });
+    }
+
+    Ok(tests)
+}
+
+#[tauri::command]
+pub async fn delete_full_test(app_handle: AppHandle, full_test_id: i64) -> Result<(), String> {
+    let conn = init_db(&app_handle)?;
+
+    conn.execute(
+        "UPDATE full_tests SET active = 0 WHERE id = ?",
+        params![full_test_id],
+    )
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn export_questions(
     app_handle: AppHandle,
     question_ids: Vec<i64>,
@@ -1254,7 +1520,9 @@ pub async fn export_questions(
     }
 
     let conn = init_db(&app_handle)?;
-    let app_dir = app_handle.path().app_data_dir()
+    let app_dir = app_handle
+        .path()
+        .app_data_dir()
         .map_err(|e| format!("Failed to get app data directory: {}", e))?;
     let selected_ids: HashSet<i64> = question_ids.into_iter().collect();
 
@@ -1334,7 +1602,9 @@ pub async fn import_questions(
     }
 
     let conn = init_db(&app_handle)?;
-    let app_dir = app_handle.path().app_data_dir()
+    let app_dir = app_handle
+        .path()
+        .app_data_dir()
         .map_err(|e| format!("Failed to get app data directory: {}", e))?;
     fs::create_dir_all(&app_dir).map_err(|e| e.to_string())?;
 
@@ -1411,16 +1681,14 @@ pub async fn import_questions(
 }
 
 #[tauri::command]
-pub async fn delete_question(
-    app_handle: AppHandle,
-    question_id: i64,
-) -> Result<String, String> {
+pub async fn delete_question(app_handle: AppHandle, question_id: i64) -> Result<String, String> {
     let conn = init_db(&app_handle)?;
 
     conn.execute(
         "UPDATE questions SET active = 0 WHERE id = ?",
         [question_id],
-    ).map_err(|e| e.to_string())?;
+    )
+    .map_err(|e| e.to_string())?;
 
     println!("Question {} deactivated successfully", question_id);
     Ok(format!("Question {} deactivated", question_id))
@@ -1453,7 +1721,9 @@ pub async fn save_image_file(
     filename: String,
     image_data: Vec<u8>,
 ) -> Result<String, String> {
-    let app_dir = app_handle.path().app_data_dir()
+    let app_dir = app_handle
+        .path()
+        .app_data_dir()
         .map_err(|e| format!("Failed to get app data directory: {}", e))?;
 
     fs::create_dir_all(&app_dir).map_err(|e| e.to_string())?;
@@ -1474,33 +1744,30 @@ pub async fn save_image_file(
 }
 
 #[tauri::command]
-pub async fn get_image_file(
-    app_handle: AppHandle,
-    filename: String,
-) -> Result<Vec<u8>, String> {
-    let app_dir = app_handle.path().app_data_dir()
+pub async fn get_image_file(app_handle: AppHandle, filename: String) -> Result<Vec<u8>, String> {
+    let app_dir = app_handle
+        .path()
+        .app_data_dir()
         .map_err(|e| format!("Failed to get app data directory: {}", e))?;
 
     let image_file_path = app_dir.join("images").join(&filename);
 
-    let data = fs::read(&image_file_path)
-        .map_err(|e| {
-            let err_msg = format!("Failed to read image file {}: {}", filename, e);
-            println!("Error: {}", err_msg);
-            err_msg
-        })?;
+    let data = fs::read(&image_file_path).map_err(|e| {
+        let err_msg = format!("Failed to read image file {}: {}", filename, e);
+        println!("Error: {}", err_msg);
+        err_msg
+    })?;
 
     Ok(data)
 }
 
 #[tauri::command]
-pub async fn get_recordings(
-    app_handle: AppHandle,
-) -> Result<Vec<Recording>, String> {
+pub async fn get_recordings(app_handle: AppHandle) -> Result<Vec<Recording>, String> {
     let conn = init_db(&app_handle)?;
 
-    let mut stmt = conn.prepare(
-        "SELECT responses.id,
+    let mut stmt = conn
+        .prepare(
+            "SELECT responses.id,
                 responses.attempt_id,
                 attempts.student_name,
                 attempts.started_at,
@@ -1513,8 +1780,9 @@ pub async fn get_recordings(
          FROM responses
          JOIN attempts ON responses.attempt_id = attempts.id
          JOIN questions ON responses.question_id = questions.id
-         ORDER BY attempts.started_at DESC, responses.recorded_at DESC"
-    ).map_err(|e| e.to_string())?;
+         ORDER BY attempts.started_at DESC, responses.recorded_at DESC",
+        )
+        .map_err(|e| e.to_string())?;
 
     let recordings = stmt
         .query_map([], |row| {
@@ -1545,27 +1813,25 @@ pub async fn get_response_audio(
 ) -> Result<Vec<u8>, String> {
     let conn = init_db(&app_handle)?;
 
-    let audio_path: String = conn.query_row(
-        "SELECT audio_path FROM responses WHERE id = ?",
-        params![response_id],
-        |row| row.get(0),
-    ).map_err(|e| e.to_string())?;
+    let audio_path: String = conn
+        .query_row(
+            "SELECT audio_path FROM responses WHERE id = ?",
+            params![response_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
 
-    let data = fs::read(&audio_path)
-        .map_err(|e| {
-            let err_msg = format!("Failed to read response audio: {}", e);
-            println!("Error: {}", err_msg);
-            err_msg
-        })?;
+    let data = fs::read(&audio_path).map_err(|e| {
+        let err_msg = format!("Failed to read response audio: {}", e);
+        println!("Error: {}", err_msg);
+        err_msg
+    })?;
 
     Ok(data)
 }
 
 #[tauri::command]
-pub async fn delete_response(
-    app_handle: AppHandle,
-    response_id: i64,
-) -> Result<(), String> {
+pub async fn delete_response(app_handle: AppHandle, response_id: i64) -> Result<(), String> {
     let conn = init_db(&app_handle)?;
 
     let audio_path: Option<String> = conn
@@ -1592,20 +1858,14 @@ pub async fn delete_response(
     )
     .map_err(|e| e.to_string())?;
 
-    conn.execute(
-        "DELETE FROM responses WHERE id = ?",
-        params![response_id],
-    )
-    .map_err(|e| e.to_string())?;
+    conn.execute("DELETE FROM responses WHERE id = ?", params![response_id])
+        .map_err(|e| e.to_string())?;
 
     Ok(())
 }
 
 #[tauri::command]
-pub async fn delete_attempt(
-    app_handle: AppHandle,
-    attempt_id: i64,
-) -> Result<(), String> {
+pub async fn delete_attempt(app_handle: AppHandle, attempt_id: i64) -> Result<(), String> {
     let conn = init_db(&app_handle)?;
 
     let mut stmt = conn
@@ -1643,7 +1903,10 @@ pub async fn delete_attempt(
             params.push(id);
         }
         conn.execute(
-            &format!("DELETE FROM ratings WHERE response_id IN ({})", placeholders),
+            &format!(
+                "DELETE FROM ratings WHERE response_id IN ({})",
+                placeholders
+            ),
             params.as_slice(),
         )
         .map_err(|e| e.to_string())?;
@@ -1655,11 +1918,8 @@ pub async fn delete_attempt(
     )
     .map_err(|e| e.to_string())?;
 
-    conn.execute(
-        "DELETE FROM attempts WHERE id = ?",
-        params![attempt_id],
-    )
-    .map_err(|e| e.to_string())?;
+    conn.execute("DELETE FROM attempts WHERE id = ?", params![attempt_id])
+        .map_err(|e| e.to_string())?;
 
     Ok(())
 }

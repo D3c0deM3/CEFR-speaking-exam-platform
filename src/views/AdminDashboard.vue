@@ -329,6 +329,140 @@
       </div>
     </div>
 
+    <!-- Full Tests Tab -->
+    <div v-if="activeTab === 'Full Tests'" class="tab-content">
+      <div class="section">
+        <div class="section-header">
+          <div>
+            <h2>Create Full Test</h2>
+            <p class="muted-copy">Choose questions from Part 1.1, Part 1.2, Part 2, and Part 3, then save them as one student-facing test.</p>
+          </div>
+          <span class="transfer-count">{{ fullTestQuestionIds.length }} selected</span>
+        </div>
+
+        <div class="form-grid">
+          <div class="form-group form-span">
+            <label>Test Name</label>
+            <input
+              v-model.trim="newFullTest.name"
+              type="text"
+              class="form-input"
+              placeholder="e.g. Mock Test 1"
+              @keyup.enter="createFullTest"
+            />
+          </div>
+        </div>
+
+        <div class="test-section-counts">
+          <span
+            v-for="section in sectionOrder"
+            :key="section.key"
+            class="test-count-chip"
+            :class="{ complete: fullTestSectionCounts[section.key] > 0 }"
+          >
+            {{ section.label }}: {{ fullTestSectionCounts[section.key] || 0 }}
+          </span>
+        </div>
+
+        <div v-if="questions.length === 0" class="empty-state">
+          <p>No questions added yet. Add questions before creating a full test.</p>
+        </div>
+        <div v-else class="test-builder-grid">
+          <section
+            v-for="group in fullTestQuestionGroups"
+            :key="group.key"
+            class="test-builder-group"
+          >
+            <div class="test-group-header">
+              <h3>{{ group.label }}</h3>
+              <button
+                type="button"
+                class="secondary-btn compact"
+                @click="toggleFullTestSection(group.questions)"
+              >
+                {{ isFullTestSectionSelected(group.questions) ? 'Clear' : 'Select all' }}
+              </button>
+            </div>
+
+            <label
+              v-for="question in group.questions"
+              :key="question.id"
+              class="test-question-option"
+              :class="{ selected: isFullTestQuestionSelected(question.id) }"
+            >
+              <input
+                type="checkbox"
+                :checked="isFullTestQuestionSelected(question.id)"
+                @change="toggleFullTestQuestion(question.id, $event.target.checked)"
+              />
+              <span>
+                <strong>ID {{ question.id }}</strong>
+                <small>{{ describeQuestion(question) }}</small>
+                <em>
+                  {{ question.response_time }}s
+                  <template v-if="question.pack_id"> - Pack {{ question.pack_id }}</template>
+                  <template v-if="question.pack_order"> - Order {{ question.pack_order }}</template>
+                </em>
+              </span>
+            </label>
+          </section>
+        </div>
+
+        <div class="test-actions">
+          <button
+            class="secondary-btn"
+            type="button"
+            @click="clearFullTestSelection"
+          >
+            Clear selection
+          </button>
+          <button
+            class="add-btn"
+            :disabled="creatingFullTest || !canCreateFullTest"
+            @click="createFullTest"
+          >
+            {{ creatingFullTest ? 'Saving...' : 'Save Full Test' }}
+          </button>
+        </div>
+      </div>
+
+      <div class="section">
+        <h2>Existing Full Tests</h2>
+        <div v-if="fullTests.length === 0" class="empty-state">
+          <p>No full tests created yet</p>
+        </div>
+        <div v-else class="full-tests-list">
+          <div
+            v-for="test in fullTests"
+            :key="test.id"
+            class="full-test-card"
+          >
+            <div class="full-test-main">
+              <h3>{{ test.name }}</h3>
+              <p>{{ test.questions.length }} question(s) - Created {{ formatDate(test.created_at) }}</p>
+              <div class="test-section-counts">
+                <span
+                  v-for="section in sectionOrder"
+                  :key="section.key"
+                  class="test-count-chip"
+                  :class="{ complete: getFullTestSectionCount(test, section) > 0 }"
+                >
+                  {{ section.label }}: {{ getFullTestSectionCount(test, section) }}
+                </span>
+              </div>
+            </div>
+            <button
+              class="delete-btn"
+              :disabled="test.isDeleting"
+              @click="deleteFullTest(test)"
+            >
+              {{ test.isDeleting ? 'Deleting...' : 'Delete' }}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- Recordings Tab -->
     <div v-if="activeTab === 'Recordings'" class="tab-content">
       <h2>Student Recordings</h2>
@@ -414,12 +548,14 @@ import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 
 const activeTab = ref('Attempts')
-const tabs = ['Attempts', 'Questions', 'Recordings', 'Statistics']
+const tabs = ['Attempts', 'Questions', 'Full Tests', 'Recordings', 'Statistics']
 const searchQuery = ref('')
 const attempts = ref([])
 const questions = ref([])
+const fullTests = ref([])
 const recordings = ref([])
 const addingQuestion = ref(false)
+const creatingFullTest = ref(false)
 const telegramChatIdInput = ref('')
 const telegramChatIds = ref([])
 const savingTelegramChatIds = ref(false)
@@ -428,6 +564,7 @@ const imageInput = ref(null)
 const importFileInput = ref(null)
 const selectedAttemptId = ref(null)
 const selectedQuestionIds = ref([])
+const fullTestQuestionIds = ref([])
 const exportingQuestions = ref(false)
 const importingQuestions = ref(false)
 const importFileName = ref('')
@@ -451,6 +588,17 @@ const newQuestion = ref({
   imageFileName: '',
   imageData: null
 })
+
+const newFullTest = ref({
+  name: ''
+})
+
+const sectionOrder = [
+  { key: '1-1', label: 'Part 1.1', part: 1, subPart: 1 },
+  { key: '1-2', label: 'Part 1.2', part: 1, subPart: 2 },
+  { key: '2-0', label: 'Part 2', part: 2, subPart: 0 },
+  { key: '3-0', label: 'Part 3', part: 3, subPart: 0 }
+]
 
 const filteredAttempts = computed(() => {
   return attempts.value.filter(attempt =>
@@ -519,6 +667,41 @@ const filteredExportQuestions = computed(() => {
   return exportFilteredQuestions.value.filter(question => selectedIds.has(question.id))
 })
 
+const fullTestQuestionGroups = computed(() => {
+  return sectionOrder
+    .map((section) => ({
+      ...section,
+      questions: questions.value
+        .filter(question => question.part === section.part && question.sub_part === section.subPart)
+        .sort(sortQuestionForPicker)
+    }))
+    .filter(group => group.questions.length > 0)
+})
+
+const fullTestSectionCounts = computed(() => {
+  const selectedIds = new Set(fullTestQuestionIds.value)
+  return sectionOrder.reduce((counts, section) => {
+    counts[section.key] = questions.value.filter((question) => (
+      selectedIds.has(question.id) &&
+      question.part === section.part &&
+      question.sub_part === section.subPart
+    )).length
+    return counts
+  }, {})
+})
+
+const missingFullTestSections = computed(() => {
+  return sectionOrder
+    .filter(section => (fullTestSectionCounts.value[section.key] || 0) === 0)
+    .map(section => section.label)
+})
+
+const canCreateFullTest = computed(() => {
+  return Boolean(newFullTest.value.name.trim()) &&
+    fullTestQuestionIds.value.length > 0 &&
+    missingFullTestSections.value.length === 0
+})
+
 const needsPack = computed(() => newQuestion.value.part === '1.1' || newQuestion.value.part === '1.2')
 const showImageUpload = computed(() => ['1.2', '2', '3'].includes(newQuestion.value.part))
 const imageRequired = computed(() => newQuestion.value.part === '1.2' || newQuestion.value.part === '3')
@@ -580,8 +763,21 @@ async function loadQuestions() {
     questions.value = data || []
     const activeIds = new Set(questions.value.map(question => question.id))
     selectedQuestionIds.value = selectedQuestionIds.value.filter(id => activeIds.has(id))
+    fullTestQuestionIds.value = fullTestQuestionIds.value.filter(id => activeIds.has(id))
   } catch (error) {
     console.error('Failed to load questions:', error)
+  }
+}
+
+async function loadFullTests() {
+  try {
+    const data = await invoke('get_full_tests')
+    fullTests.value = (data || []).map((test) => ({
+      ...test,
+      isDeleting: false
+    }))
+  } catch (error) {
+    console.error('Failed to load full tests:', error)
   }
 }
 
@@ -676,6 +872,120 @@ function clearQuestionSelection() {
   selectedQuestionIds.value = []
 }
 
+function sortQuestionForPicker(a, b) {
+  const orderA = Number(a.pack_order) || Number.MAX_SAFE_INTEGER
+  const orderB = Number(b.pack_order) || Number.MAX_SAFE_INTEGER
+
+  if (a.part !== b.part) return a.part - b.part
+  if (a.sub_part !== b.sub_part) return a.sub_part - b.sub_part
+  if (orderA !== orderB) return orderA - orderB
+  return a.id - b.id
+}
+
+function isFullTestQuestionSelected(questionId) {
+  return fullTestQuestionIds.value.includes(questionId)
+}
+
+function toggleFullTestQuestion(questionId, isSelected) {
+  if (isSelected) {
+    if (!fullTestQuestionIds.value.includes(questionId)) {
+      fullTestQuestionIds.value = [...fullTestQuestionIds.value, questionId]
+    }
+    return
+  }
+
+  fullTestQuestionIds.value = fullTestQuestionIds.value.filter(id => id !== questionId)
+}
+
+function isFullTestSectionSelected(sectionQuestions) {
+  return sectionQuestions.length > 0 &&
+    sectionQuestions.every(question => fullTestQuestionIds.value.includes(question.id))
+}
+
+function toggleFullTestSection(sectionQuestions) {
+  const sectionIds = sectionQuestions.map(question => question.id)
+
+  if (isFullTestSectionSelected(sectionQuestions)) {
+    fullTestQuestionIds.value = fullTestQuestionIds.value.filter(id => !sectionIds.includes(id))
+    return
+  }
+
+  fullTestQuestionIds.value = [...new Set([...fullTestQuestionIds.value, ...sectionIds])]
+}
+
+function clearFullTestSelection() {
+  fullTestQuestionIds.value = []
+}
+
+function describeQuestion(question) {
+  const text = question.text?.trim()
+  if (text) return text
+  if (question.image_path) return 'Image prompt'
+  if (question.audio_path) return 'Audio prompt'
+  return 'Untitled question'
+}
+
+function getFullTestSectionCount(test, section) {
+  return (test.questions || []).filter((question) => (
+    question.part === section.part && question.sub_part === section.subPart
+  )).length
+}
+
+async function createFullTest() {
+  if (!newFullTest.value.name.trim()) {
+    alert('Please enter a full test name')
+    return
+  }
+
+  if (missingFullTestSections.value.length > 0) {
+    alert(`Please include at least one question from: ${missingFullTestSections.value.join(', ')}`)
+    return
+  }
+
+  creatingFullTest.value = true
+  try {
+    const selectedIds = new Set(fullTestQuestionIds.value)
+    const questionIds = questions.value
+      .filter(question => selectedIds.has(question.id))
+      .sort(sortQuestionForPicker)
+      .map(question => question.id)
+
+    await invoke('create_full_test', {
+      name: newFullTest.value.name.trim(),
+      questionIds
+    })
+
+    newFullTest.value.name = ''
+    fullTestQuestionIds.value = []
+    await loadFullTests()
+    alert('Full test saved successfully!')
+  } catch (error) {
+    console.error('Failed to create full test:', error)
+    alert('Error creating full test: ' + (error?.message || String(error)))
+  } finally {
+    creatingFullTest.value = false
+  }
+}
+
+async function deleteFullTest(test) {
+  if (test.isDeleting) return
+  const confirmDelete = confirm(`Delete "${test.name}"? Students will no longer be able to choose it.`)
+  if (!confirmDelete) return
+
+  test.isDeleting = true
+  try {
+    await invoke('delete_full_test', {
+      fullTestId: test.id
+    })
+    fullTests.value = fullTests.value.filter(item => item.id !== test.id)
+  } catch (error) {
+    console.error('Failed to delete full test:', error)
+    alert('Error deleting full test: ' + (error?.message || String(error)))
+  } finally {
+    test.isDeleting = false
+  }
+}
+
 async function exportQuestionsFile() {
   const questionIds = filteredExportQuestions.value.map(question => question.id)
   if (questionIds.length === 0) {
@@ -718,6 +1028,7 @@ async function importQuestionsFile() {
       exportJson: importFileText.value
     })
     await loadQuestions()
+    await loadFullTests()
     importFileName.value = ''
     importFileText.value = ''
     if (importFileInput.value) {
@@ -809,6 +1120,7 @@ async function addQuestion() {
 
     resetQuestionForm()
     await loadQuestions()
+    await loadFullTests()
     alert('Question added successfully!')
   } catch (error) {
     console.error('Failed to add question:', error)
@@ -955,6 +1267,7 @@ async function deleteQuestion(questionId) {
         questionId: questionId
       })
       await loadQuestions()
+      await loadFullTests()
       alert('Question deleted successfully!')
     } catch (error) {
       console.error('Failed to delete question:', error)
@@ -966,6 +1279,7 @@ async function deleteQuestion(questionId) {
 onMounted(() => {
   loadAttempts()
   loadQuestions()
+  loadFullTests()
   loadRecordings()
   loadTelegramChatIds()
 })
@@ -1201,6 +1515,12 @@ watch(recordingsByAttempt, (groups) => {
   margin-bottom: 16px;
 }
 
+.muted-copy {
+  margin: 8px 0 0;
+  color: #64748b;
+  font-size: 14px;
+}
+
 .search-input {
   width: 100%;
   max-width: 360px;
@@ -1379,6 +1699,11 @@ watch(recordingsByAttempt, (groups) => {
   transform: translateY(-1px);
 }
 
+.secondary-btn.compact {
+  padding: 0.45rem 0.75rem;
+  font-size: 0.8rem;
+}
+
 .import-label {
   width: min(360px, 100%);
 }
@@ -1463,6 +1788,142 @@ watch(recordingsByAttempt, (groups) => {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
   gap: 1rem;
+}
+
+.test-section-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 12px 0 18px;
+}
+
+.test-count-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 5px 9px;
+  border-radius: 999px;
+  background: #fee2e2;
+  color: #991b1b;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.test-count-chip.complete {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.test-builder-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 16px;
+  margin-top: 18px;
+}
+
+.test-builder-group {
+  display: grid;
+  gap: 10px;
+  padding: 16px;
+  border-radius: 14px;
+  background: #f8fafc;
+  border: 1px solid rgba(148, 163, 184, 0.3);
+}
+
+.test-group-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.test-group-header h3 {
+  margin: 0;
+  font-size: 16px;
+  color: #0f172a;
+}
+
+.test-question-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px;
+  border-radius: 10px;
+  background: white;
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  cursor: pointer;
+}
+
+.test-question-option.selected {
+  background: #eff6ff;
+  border-color: rgba(37, 99, 235, 0.42);
+}
+
+.test-question-option input {
+  margin-top: 3px;
+  accent-color: #1d4ed8;
+}
+
+.test-question-option span {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.test-question-option strong {
+  color: #0f172a;
+  font-size: 13px;
+}
+
+.test-question-option small {
+  color: #334155;
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.test-question-option em {
+  color: #64748b;
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 600;
+}
+
+.test-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 18px;
+}
+
+.full-tests-list {
+  display: grid;
+  gap: 14px;
+  margin-top: 16px;
+}
+
+.full-test-card {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px;
+  border-radius: 14px;
+  background: #f8fafc;
+  border: 1px solid rgba(148, 163, 184, 0.3);
+}
+
+.full-test-main {
+  min-width: 0;
+}
+
+.full-test-main h3 {
+  margin: 0 0 5px;
+  color: #0f172a;
+}
+
+.full-test-main p {
+  margin: 0;
+  color: #64748b;
+  font-size: 13px;
 }
 
 .question-card {
