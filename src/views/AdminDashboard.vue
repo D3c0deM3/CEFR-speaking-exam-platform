@@ -395,13 +395,23 @@
                 :checked="isFullTestQuestionSelected(question.id)"
                 @change="toggleFullTestQuestion(question.id, $event.target.checked)"
               />
-              <span>
+              <span class="test-question-body">
                 <strong>ID {{ question.id }}</strong>
-                <small>{{ describeQuestion(question) }}</small>
+                <small v-if="question.text" class="test-question-text">{{ question.text }}</small>
+                <span v-if="question.image_path" class="test-question-preview">
+                  <img
+                    v-if="getQuestionImageUrl(question.id)"
+                    :src="getQuestionImageUrl(question.id)"
+                    alt="Question prompt preview"
+                  />
+                  <span v-else class="preview-placeholder">Image preview unavailable</span>
+                </span>
+                <small v-else>{{ describeQuestion(question) }}</small>
                 <em>
                   {{ question.response_time }}s
                   <template v-if="question.pack_id"> - Pack {{ question.pack_id }}</template>
                   <template v-if="question.pack_order"> - Order {{ question.pack_order }}</template>
+                  <template v-if="question.audio_path"> - Audio</template>
                 </em>
               </span>
             </label>
@@ -422,6 +432,34 @@
             @click="createFullTest"
           >
             {{ creatingFullTest ? 'Saving...' : 'Save Full Test' }}
+          </button>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="transfer-header">
+          <div>
+            <h2>Import / Export Full Tests</h2>
+            <p>Export one saved full test with its questions and media, then import it on another app as a ready-to-use full test.</p>
+          </div>
+        </div>
+        <div class="import-row">
+          <input
+            ref="fullTestImportFileInput"
+            type="file"
+            accept=".json,application/json"
+            class="file-input"
+            @change="onFullTestImportFileSelected"
+          />
+          <label class="file-label import-label" @click="$refs.fullTestImportFileInput?.click()">
+            {{ fullTestImportFileName ? `Selected: ${fullTestImportFileName}` : 'Choose Full Test Export File' }}
+          </label>
+          <button
+            class="action-btn"
+            :disabled="importingFullTest || !fullTestImportFileText"
+            @click="importFullTestFile"
+          >
+            {{ importingFullTest ? 'Importing...' : 'Import Full Test' }}
           </button>
         </div>
       </div>
@@ -451,13 +489,22 @@
                 </span>
               </div>
             </div>
-            <button
-              class="delete-btn"
-              :disabled="test.isDeleting"
-              @click="deleteFullTest(test)"
-            >
-              {{ test.isDeleting ? 'Deleting...' : 'Delete' }}
-            </button>
+            <div class="full-test-actions">
+              <button
+                class="secondary-btn compact"
+                :disabled="isFullTestExporting(test.id)"
+                @click="exportFullTestFile(test)"
+              >
+                {{ isFullTestExporting(test.id) ? 'Exporting...' : 'Export' }}
+              </button>
+              <button
+                class="delete-btn"
+                :disabled="test.isDeleting"
+                @click="deleteFullTest(test)"
+              >
+                {{ test.isDeleting ? 'Deleting...' : 'Delete' }}
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -554,6 +601,7 @@ const attempts = ref([])
 const questions = ref([])
 const fullTests = ref([])
 const recordings = ref([])
+const questionImageUrls = ref({})
 const addingQuestion = ref(false)
 const creatingFullTest = ref(false)
 const telegramChatIdInput = ref('')
@@ -562,13 +610,18 @@ const savingTelegramChatIds = ref(false)
 const audioInput = ref(null)
 const imageInput = ref(null)
 const importFileInput = ref(null)
+const fullTestImportFileInput = ref(null)
 const selectedAttemptId = ref(null)
 const selectedQuestionIds = ref([])
 const fullTestQuestionIds = ref([])
 const exportingQuestions = ref(false)
 const importingQuestions = ref(false)
+const importingFullTest = ref(false)
+const exportingFullTestIds = ref([])
 const importFileName = ref('')
 const importFileText = ref('')
+const fullTestImportFileName = ref('')
+const fullTestImportFileText = ref('')
 const exportOptions = ref({
   part: 'all',
   packId: 'all',
@@ -717,6 +770,8 @@ const totalAttempts = computed(() => attempts.value.length)
 const completedAttempts = computed(() => attempts.value.filter(a => a.finished_at).length)
 const inProgressAttempts = computed(() => attempts.value.filter(a => !a.finished_at).length)
 
+let questionPreviewLoadToken = 0
+
 function onAudioSelected(event) {
   const file = event.target.files?.[0]
   if (file) {
@@ -745,6 +800,18 @@ async function onImportFileSelected(event) {
   importFileText.value = await file.text()
 }
 
+async function onFullTestImportFileSelected(event) {
+  const file = event.target.files?.[0]
+  if (!file) {
+    fullTestImportFileName.value = ''
+    fullTestImportFileText.value = ''
+    return
+  }
+
+  fullTestImportFileName.value = file.name
+  fullTestImportFileText.value = await file.text()
+}
+
 async function loadAttempts() {
   try {
     const data = await invoke('get_attempts')
@@ -764,6 +831,7 @@ async function loadQuestions() {
     const activeIds = new Set(questions.value.map(question => question.id))
     selectedQuestionIds.value = selectedQuestionIds.value.filter(id => activeIds.has(id))
     fullTestQuestionIds.value = fullTestQuestionIds.value.filter(id => activeIds.has(id))
+    await loadQuestionPreviewImages(questions.value)
   } catch (error) {
     console.error('Failed to load questions:', error)
   }
@@ -931,6 +999,45 @@ function getFullTestSectionCount(test, section) {
   )).length
 }
 
+function getQuestionImageUrl(questionId) {
+  return questionImageUrls.value[questionId] || ''
+}
+
+async function loadQuestionPreviewImages(questionList) {
+  const loadToken = ++questionPreviewLoadToken
+  revokeQuestionPreviewUrls()
+
+  const imageQuestions = questionList.filter(question => question.image_path)
+  if (imageQuestions.length === 0) {
+    questionImageUrls.value = {}
+    return
+  }
+
+  const nextUrls = {}
+  await Promise.all(imageQuestions.map(async (question) => {
+    try {
+      const imageData = await invoke('get_image_file', { filename: question.image_path.trim() })
+      const imageArray = new Uint8Array(imageData)
+      const imageBlob = new Blob([imageArray], { type: resolveImageType(question.image_path) })
+      nextUrls[question.id] = URL.createObjectURL(imageBlob)
+    } catch (error) {
+      console.error(`Failed to load preview for question ${question.id}:`, error)
+    }
+  }))
+
+  if (loadToken !== questionPreviewLoadToken) {
+    Object.values(nextUrls).forEach(url => URL.revokeObjectURL(url))
+    return
+  }
+
+  questionImageUrls.value = nextUrls
+}
+
+function revokeQuestionPreviewUrls() {
+  Object.values(questionImageUrls.value).forEach(url => URL.revokeObjectURL(url))
+  questionImageUrls.value = {}
+}
+
 async function createFullTest() {
   if (!newFullTest.value.name.trim()) {
     alert('Please enter a full test name')
@@ -983,6 +1090,63 @@ async function deleteFullTest(test) {
     alert('Error deleting full test: ' + (error?.message || String(error)))
   } finally {
     test.isDeleting = false
+  }
+}
+
+function isFullTestExporting(testId) {
+  return exportingFullTestIds.value.includes(testId)
+}
+
+async function exportFullTestFile(test) {
+  if (isFullTestExporting(test.id)) return
+
+  exportingFullTestIds.value = [...exportingFullTestIds.value, test.id]
+  try {
+    const exportJson = await invoke('export_full_test', {
+      fullTestId: test.id
+    })
+    const blob = new Blob([exportJson], { type: 'application/json' })
+    const downloadUrl = URL.createObjectURL(blob)
+    const downloadLink = document.createElement('a')
+    downloadLink.href = downloadUrl
+    downloadLink.download = `cefr-full-test-${sanitizeFilePart(test.name)}-${new Date().toISOString().slice(0, 10)}.json`
+    document.body.appendChild(downloadLink)
+    downloadLink.click()
+    downloadLink.remove()
+    URL.revokeObjectURL(downloadUrl)
+    alert(`Exported "${test.name}" successfully.`)
+  } catch (error) {
+    console.error('Failed to export full test:', error)
+    alert('Error exporting full test: ' + (error?.message || String(error)))
+  } finally {
+    exportingFullTestIds.value = exportingFullTestIds.value.filter(id => id !== test.id)
+  }
+}
+
+async function importFullTestFile() {
+  if (!fullTestImportFileText.value) {
+    alert('Choose a full test export file first')
+    return
+  }
+
+  importingFullTest.value = true
+  try {
+    const result = await invoke('import_full_test', {
+      exportJson: fullTestImportFileText.value
+    })
+    await loadQuestions()
+    await loadFullTests()
+    fullTestImportFileName.value = ''
+    fullTestImportFileText.value = ''
+    if (fullTestImportFileInput.value) {
+      fullTestImportFileInput.value.value = ''
+    }
+    alert(`Imported ${result.imported_tests || 0} full test(s) with ${result.imported_questions || 0} question(s).`)
+  } catch (error) {
+    console.error('Failed to import full test:', error)
+    alert('Error importing full test: ' + (error?.message || String(error)))
+  } finally {
+    importingFullTest.value = false
   }
 }
 
@@ -1213,6 +1377,24 @@ function getFileExtension(filename, fallback = 'png') {
   return segments.length > 1 ? segments.pop().toLowerCase() : fallback
 }
 
+function resolveImageType(filename) {
+  const ext = filename.split('.').pop()?.toLowerCase()
+  if (ext === 'png') return 'image/png'
+  if (ext === 'webp') return 'image/webp'
+  if (ext === 'gif') return 'image/gif'
+  return 'image/jpeg'
+}
+
+function sanitizeFilePart(value) {
+  return (value || 'test')
+    .toString()
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 60) || 'test'
+}
+
 function formatPart(part, subPart) {
   if (part === 1 && subPart === 1) return 'Part 1.1'
   if (part === 1 && subPart === 2) return 'Part 1.2'
@@ -1286,6 +1468,8 @@ onMounted(() => {
 
 onUnmounted(() => {
   revokeRecordingUrls()
+  questionPreviewLoadToken += 1
+  revokeQuestionPreviewUrls()
 })
 
 watch(() => newQuestion.value.part, (value) => {
@@ -1863,9 +2047,10 @@ watch(recordingsByAttempt, (groups) => {
   accent-color: #1d4ed8;
 }
 
-.test-question-option span {
+.test-question-body {
   display: grid;
   min-width: 0;
+  width: 100%;
   gap: 4px;
 }
 
@@ -1878,6 +2063,42 @@ watch(recordingsByAttempt, (groups) => {
   color: #334155;
   font-size: 13px;
   line-height: 1.35;
+}
+
+.test-question-text {
+  white-space: pre-wrap;
+}
+
+.test-question-preview {
+  display: block;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  max-height: 220px;
+  overflow: hidden;
+  border-radius: 8px;
+  background: #f8fafc;
+  border: 1px solid rgba(148, 163, 184, 0.28);
+}
+
+.test-question-preview img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: white;
+}
+
+.preview-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 600;
+  text-align: center;
+  padding: 10px;
 }
 
 .test-question-option em {
@@ -1924,6 +2145,13 @@ watch(recordingsByAttempt, (groups) => {
   margin: 0;
   color: #64748b;
   font-size: 13px;
+}
+
+.full-test-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
 }
 
 .question-card {

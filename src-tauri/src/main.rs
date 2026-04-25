@@ -19,6 +19,8 @@ fn main() {
             create_full_test,
             get_full_tests,
             delete_full_test,
+            export_full_test,
+            import_full_test,
             export_questions,
             import_questions,
             delete_question,

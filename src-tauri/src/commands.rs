@@ -3,7 +3,7 @@ use rand::{distributions::Alphanumeric, Rng};
 use reqwest::multipart::{Form, Part};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -95,6 +95,24 @@ struct QuestionsExportFile {
 #[derive(Serialize, Debug)]
 pub struct ImportQuestionsResult {
     pub imported: usize,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct FullTestExportFile {
+    format: String,
+    version: i32,
+    exported_at: String,
+    source_id: i64,
+    name: String,
+    created_at: String,
+    questions: Vec<ExportedQuestion>,
+}
+
+#[derive(Serialize, Debug)]
+pub struct ImportFullTestResult {
+    pub imported_tests: usize,
+    pub imported_questions: usize,
+    pub full_test_id: i64,
 }
 
 const DEFAULT_TELEGRAM_BOT_TOKEN: &str = "8505694385:AAELharS3HfJoSc4CmAxinNFRR-LteH5dIA";
@@ -614,6 +632,101 @@ fn write_imported_asset(
     })?;
 
     Ok(safe_filename)
+}
+
+fn validate_exported_question(question: &ExportedQuestion) -> Result<(), String> {
+    if question.response_time <= 0 {
+        return Err(format!(
+            "Question {} has an invalid response time",
+            question.source_id
+        ));
+    }
+
+    let has_image_asset = question.image_file.is_some();
+    if question.part == 1 && question.sub_part == 2 && !has_image_asset {
+        return Err(format!(
+            "Question {} is Part 1.2 and needs an image file",
+            question.source_id
+        ));
+    }
+
+    if question.part == 3 && !has_image_asset {
+        return Err(format!(
+            "Question {} is Part 3 and needs an image file",
+            question.source_id
+        ));
+    }
+
+    if question.part == 1 && (question.sub_part == 1 || question.sub_part == 2) {
+        if question.pack_id.trim().is_empty() {
+            return Err(format!(
+                "Question {} needs a test pack ID",
+                question.source_id
+            ));
+        }
+        if question.pack_order <= 0 {
+            return Err(format!(
+                "Question {} needs a pack order",
+                question.source_id
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_exported_full_test_sections(questions: &[ExportedQuestion]) -> Result<(), String> {
+    let required_sections = [(1, 1), (1, 2), (2, 0), (3, 0)];
+    for (part, sub_part) in required_sections {
+        let exists = questions
+            .iter()
+            .any(|question| question.part == part && question.sub_part == sub_part);
+
+        if !exists {
+            return Err(format!(
+                "A full test import must include at least one {} question",
+                section_label(part, sub_part)
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn insert_exported_question(
+    conn: &Connection,
+    app_dir: &Path,
+    question: ExportedQuestion,
+) -> Result<i64, String> {
+    validate_exported_question(&question)?;
+
+    let sub_part_value = question.sub_part;
+    let pack_id_value = question.pack_id.trim().to_string();
+    let audio = write_imported_asset(app_dir, "audio", question.audio_file.as_ref())?;
+    let image = write_imported_asset(app_dir, "images", question.image_file.as_ref())?;
+    let question_text = if question.part == 3 {
+        String::new()
+    } else {
+        question.text
+    };
+
+    conn.execute(
+        "INSERT INTO questions (part, sub_part, audio_path, image_path, text, pack_id, pack_order, response_time, active)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)",
+        params![
+            question.part,
+            sub_part_value,
+            audio,
+            image,
+            question_text,
+            pack_id_value,
+            question.pack_order,
+            question.response_time
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+
+    Ok(conn.last_insert_rowid())
 }
 
 fn guess_mime(path: &Path, is_image: bool) -> &'static str {
@@ -1608,76 +1721,171 @@ pub async fn import_questions(
         .map_err(|e| format!("Failed to get app data directory: {}", e))?;
     fs::create_dir_all(&app_dir).map_err(|e| e.to_string())?;
 
-    let mut imported = 0usize;
+    for question in &import_file.questions {
+        validate_exported_question(question)?;
+    }
+
+    let imported = import_file.questions.len();
     for question in import_file.questions {
-        let sub_part_value = question.sub_part;
-        let has_image_asset = question.image_file.is_some();
-
-        if question.response_time <= 0 {
-            return Err(format!(
-                "Question {} has an invalid response time",
-                question.source_id
-            ));
-        }
-
-        if question.part == 1 && sub_part_value == 2 && !has_image_asset {
-            return Err(format!(
-                "Question {} is Part 1.2 and needs an image file",
-                question.source_id
-            ));
-        }
-
-        if question.part == 3 && !has_image_asset {
-            return Err(format!(
-                "Question {} is Part 3 and needs an image file",
-                question.source_id
-            ));
-        }
-
-        let pack_id_value = question.pack_id.trim().to_string();
-        if question.part == 1 && (sub_part_value == 1 || sub_part_value == 2) {
-            if pack_id_value.is_empty() {
-                return Err(format!(
-                    "Question {} needs a test pack ID",
-                    question.source_id
-                ));
-            }
-            if question.pack_order <= 0 {
-                return Err(format!(
-                    "Question {} needs a pack order",
-                    question.source_id
-                ));
-            }
-        }
-
-        let audio = write_imported_asset(&app_dir, "audio", question.audio_file.as_ref())?;
-        let image = write_imported_asset(&app_dir, "images", question.image_file.as_ref())?;
-        let question_text = if question.part == 3 {
-            String::new()
-        } else {
-            question.text
-        };
-
-        conn.execute(
-            "INSERT INTO questions (part, sub_part, audio_path, image_path, text, pack_id, pack_order, response_time, active)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)",
-            params![
-                question.part,
-                sub_part_value,
-                audio,
-                image,
-                question_text,
-                pack_id_value,
-                question.pack_order,
-                question.response_time
-            ],
-        )
-        .map_err(|e| e.to_string())?;
-
-        imported += 1;
+        insert_exported_question(&conn, &app_dir, question)?;
     }
 
     Ok(ImportQuestionsResult { imported })
+}
+
+#[tauri::command]
+pub async fn export_full_test(app_handle: AppHandle, full_test_id: i64) -> Result<String, String> {
+    let conn = init_db(&app_handle)?;
+    let app_dir = app_handle
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to get app data directory: {}", e))?;
+
+    let (source_id, name, created_at): (i64, String, String) = conn
+        .query_row(
+            "SELECT id, name, created_at
+             FROM full_tests
+             WHERE id = ? AND active = 1",
+            params![full_test_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "Full test not found or inactive".to_string())?;
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT questions.id,
+                    questions.part,
+                    questions.sub_part,
+                    questions.audio_path,
+                    questions.image_path,
+                    questions.text,
+                    questions.pack_id,
+                    questions.pack_order,
+                    questions.response_time,
+                    questions.active
+             FROM full_test_questions
+             JOIN questions ON full_test_questions.question_id = questions.id
+             WHERE full_test_questions.full_test_id = ? AND questions.active = 1
+             ORDER BY full_test_questions.position ASC",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let question_rows = stmt
+        .query_map(params![full_test_id], question_from_row)
+        .map_err(|e| e.to_string())?;
+
+    let mut exported_questions = Vec::new();
+    for row in question_rows {
+        let question = row.map_err(|e| e.to_string())?;
+        exported_questions.push(ExportedQuestion {
+            source_id: question.id,
+            part: question.part,
+            sub_part: question.sub_part,
+            audio_path: question.audio_path.clone(),
+            image_path: question.image_path.clone(),
+            text: question.text.clone(),
+            pack_id: question.pack_id.clone(),
+            pack_order: question.pack_order,
+            response_time: question.response_time,
+            audio_file: read_exported_asset(&app_handle, &app_dir, "audio", &question.audio_path)?,
+            image_file: read_exported_asset(&app_handle, &app_dir, "images", &question.image_path)?,
+        });
+    }
+
+    if exported_questions.is_empty() {
+        return Err("This full test does not contain any active questions".to_string());
+    }
+    validate_exported_full_test_sections(&exported_questions)?;
+
+    let export_file = FullTestExportFile {
+        format: "cefr-speaking-full-test".to_string(),
+        version: 1,
+        exported_at: chrono::Local::now().to_rfc3339(),
+        source_id,
+        name,
+        created_at,
+        questions: exported_questions,
+    };
+
+    serde_json::to_string_pretty(&export_file)
+        .map_err(|e| format!("Failed to create full test export: {}", e))
+}
+
+#[tauri::command]
+pub async fn import_full_test(
+    app_handle: AppHandle,
+    export_json: String,
+) -> Result<ImportFullTestResult, String> {
+    let import_file: FullTestExportFile = serde_json::from_str(&export_json)
+        .map_err(|e| format!("This file is not a valid CEFR full test export: {}", e))?;
+
+    if import_file.format != "cefr-speaking-full-test" {
+        return Err("This file is not a CEFR speaking full test export".to_string());
+    }
+
+    let trimmed_name = import_file.name.trim().to_string();
+    if trimmed_name.is_empty() {
+        return Err("The selected full test export does not have a test name".to_string());
+    }
+
+    if import_file.questions.is_empty() {
+        return Err("The selected full test export does not contain any questions".to_string());
+    }
+
+    validate_exported_full_test_sections(&import_file.questions)?;
+
+    let mut source_ids = HashSet::new();
+    for question in &import_file.questions {
+        validate_exported_question(question)?;
+        if !source_ids.insert(question.source_id) {
+            return Err(format!(
+                "Question {} appears more than once in the full test export",
+                question.source_id
+            ));
+        }
+    }
+
+    let conn = init_db(&app_handle)?;
+    let app_dir = app_handle
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to get app data directory: {}", e))?;
+    fs::create_dir_all(&app_dir).map_err(|e| e.to_string())?;
+
+    let mut source_to_imported = HashMap::new();
+    let mut imported_question_ids = Vec::new();
+    for question in import_file.questions {
+        let source_id = question.source_id;
+        let imported_id = insert_exported_question(&conn, &app_dir, question)?;
+        source_to_imported.insert(source_id, imported_id);
+        imported_question_ids.push(imported_id);
+    }
+
+    validate_full_test_questions(&conn, &imported_question_ids)?;
+
+    conn.execute(
+        "INSERT INTO full_tests (name, active) VALUES (?, 1)",
+        params![trimmed_name],
+    )
+    .map_err(|e| e.to_string())?;
+
+    let full_test_id = conn.last_insert_rowid();
+    for (index, question_id) in imported_question_ids.iter().enumerate() {
+        conn.execute(
+            "INSERT INTO full_test_questions (full_test_id, question_id, position)
+             VALUES (?, ?, ?)",
+            params![full_test_id, question_id, (index as i32) + 1],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    Ok(ImportFullTestResult {
+        imported_tests: 1,
+        imported_questions: source_to_imported.len(),
+        full_test_id,
+    })
 }
 
 #[tauri::command]
