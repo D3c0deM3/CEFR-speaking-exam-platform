@@ -1,7 +1,5 @@
 const configuredApiOrigin = (import.meta.env.VITE_DESKTOP_AUTH_API_BASE_URL || '').trim().replace(/\/+$/, '')
-const defaultApiOrigin = import.meta.env.DEV
-  ? 'http://localhost:3000'
-  : 'https://guarded-fortress-75118-0236acf5cd86.herokuapp.com'
+const defaultApiOrigin = 'https://guarded-fortress-75118-0236acf5cd86.herokuapp.com'
 
 const apiOrigin = configuredApiOrigin || defaultApiOrigin
 const API_BASE_URL = apiOrigin.endsWith('/api') ? apiOrigin : `${apiOrigin}/api`
