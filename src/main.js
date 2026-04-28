@@ -12,6 +12,8 @@ import StudentEntry from './views/StudentEntry.vue'
 import Exam from './views/Exam.vue'
 import ExamComplete from './views/ExamComplete.vue'
 import AdminDashboard from './views/AdminDashboard.vue'
+import AuthGate from './views/AuthGate.vue'
+import { useAuthStore } from './stores/auth'
 
 // Create Pinia store
 const pinia = createPinia()
@@ -20,6 +22,7 @@ const pinia = createPinia()
 const router = createRouter({
   history: createMemoryHistory(),
   routes: [
+    { path: '/auth', component: AuthGate, meta: { public: true } },
     { path: '/', component: StudentEntry },
     { path: '/exam', component: Exam },
     { path: '/complete', component: ExamComplete },
@@ -31,6 +34,9 @@ const router = createRouter({
 let hotkeyListener = null
 
 router.beforeEach((to, from, next) => {
+  const authStore = useAuthStore()
+  authStore.restoreSession()
+
   // Remove previous listener if exists
   if (hotkeyListener) {
     window.removeEventListener('keydown', hotkeyListener)
@@ -48,6 +54,17 @@ router.beforeEach((to, from, next) => {
   }
   
   window.addEventListener('keydown', hotkeyListener)
+
+  if (!to.meta.public && !authStore.isAuthenticated) {
+    next('/auth')
+    return
+  }
+
+  if (to.path === '/auth' && authStore.isAuthenticated) {
+    next('/')
+    return
+  }
+
   next()
 })
 

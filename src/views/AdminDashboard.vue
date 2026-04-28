@@ -440,8 +440,32 @@
         <div class="transfer-header">
           <div>
             <h2>Import / Export Full Tests</h2>
-            <p>Export one saved full test with its questions and media, then import it on another app as a ready-to-use full test.</p>
+            <p>Export one or more saved full tests with their questions and media, then import them on another app as ready-to-use full tests.</p>
           </div>
+          <span class="transfer-count">{{ selectedFullTestIds.length }} selected</span>
+        </div>
+        <div class="transfer-actions">
+          <button
+            class="secondary-btn"
+            :disabled="fullTests.length === 0 || exportingSelectedFullTests"
+            @click="toggleAllFullTestsSelection"
+          >
+            {{ areAllFullTestsSelected ? 'Clear all' : 'Select all' }}
+          </button>
+          <button
+            class="secondary-btn"
+            :disabled="selectedFullTestIds.length === 0 || exportingSelectedFullTests"
+            @click="clearFullTestExportSelection"
+          >
+            Clear selection
+          </button>
+          <button
+            class="add-btn"
+            :disabled="selectedFullTestIds.length === 0 || exportingSelectedFullTests"
+            @click="exportSelectedFullTestsFile"
+          >
+            {{ exportingSelectedFullTests ? 'Exporting...' : 'Export Selected Tests' }}
+          </button>
         </div>
         <div class="import-row">
           <input
@@ -474,8 +498,17 @@
             v-for="test in fullTests"
             :key="test.id"
             class="full-test-card"
+            :class="{ selected: isFullTestSelected(test.id) }"
           >
             <div class="full-test-main">
+              <label class="full-test-select">
+                <input
+                  type="checkbox"
+                  :checked="isFullTestSelected(test.id)"
+                  @change="toggleFullTestSelection(test.id, $event.target.checked)"
+                />
+                <span>Selected for export</span>
+              </label>
               <h3>{{ test.name }}</h3>
               <p>{{ test.questions.length }} question(s) - Created {{ formatDate(test.created_at) }}</p>
               <div class="test-section-counts">
@@ -614,9 +647,11 @@ const fullTestImportFileInput = ref(null)
 const selectedAttemptId = ref(null)
 const selectedQuestionIds = ref([])
 const fullTestQuestionIds = ref([])
+const selectedFullTestIds = ref([])
 const exportingQuestions = ref(false)
 const importingQuestions = ref(false)
 const importingFullTest = ref(false)
+const exportingSelectedFullTests = ref(false)
 const exportingFullTestIds = ref([])
 const importFileName = ref('')
 const importFileText = ref('')
@@ -755,6 +790,16 @@ const canCreateFullTest = computed(() => {
     missingFullTestSections.value.length === 0
 })
 
+const selectedFullTests = computed(() => {
+  const selectedIds = new Set(selectedFullTestIds.value)
+  return fullTests.value.filter(test => selectedIds.has(test.id))
+})
+
+const areAllFullTestsSelected = computed(() => {
+  return fullTests.value.length > 0 &&
+    fullTests.value.every(test => selectedFullTestIds.value.includes(test.id))
+})
+
 const needsPack = computed(() => newQuestion.value.part === '1.1' || newQuestion.value.part === '1.2')
 const showImageUpload = computed(() => ['1.2', '2', '3'].includes(newQuestion.value.part))
 const imageRequired = computed(() => newQuestion.value.part === '1.2' || newQuestion.value.part === '3')
@@ -844,6 +889,8 @@ async function loadFullTests() {
       ...test,
       isDeleting: false
     }))
+    const activeIds = new Set(fullTests.value.map(test => test.id))
+    selectedFullTestIds.value = selectedFullTestIds.value.filter(id => activeIds.has(id))
   } catch (error) {
     console.error('Failed to load full tests:', error)
   }
@@ -985,6 +1032,34 @@ function clearFullTestSelection() {
   fullTestQuestionIds.value = []
 }
 
+function isFullTestSelected(testId) {
+  return selectedFullTestIds.value.includes(testId)
+}
+
+function toggleFullTestSelection(testId, isSelected) {
+  if (isSelected) {
+    if (!selectedFullTestIds.value.includes(testId)) {
+      selectedFullTestIds.value = [...selectedFullTestIds.value, testId]
+    }
+    return
+  }
+
+  selectedFullTestIds.value = selectedFullTestIds.value.filter(id => id !== testId)
+}
+
+function toggleAllFullTestsSelection() {
+  if (areAllFullTestsSelected.value) {
+    selectedFullTestIds.value = []
+    return
+  }
+
+  selectedFullTestIds.value = fullTests.value.map(test => test.id)
+}
+
+function clearFullTestExportSelection() {
+  selectedFullTestIds.value = []
+}
+
 function describeQuestion(question) {
   const text = question.text?.trim()
   if (text) return text
@@ -1085,6 +1160,7 @@ async function deleteFullTest(test) {
       fullTestId: test.id
     })
     fullTests.value = fullTests.value.filter(item => item.id !== test.id)
+    selectedFullTestIds.value = selectedFullTestIds.value.filter(id => id !== test.id)
   } catch (error) {
     console.error('Failed to delete full test:', error)
     alert('Error deleting full test: ' + (error?.message || String(error)))
@@ -1120,6 +1196,40 @@ async function exportFullTestFile(test) {
     alert('Error exporting full test: ' + (error?.message || String(error)))
   } finally {
     exportingFullTestIds.value = exportingFullTestIds.value.filter(id => id !== test.id)
+  }
+}
+
+async function exportSelectedFullTestsFile() {
+  const testsToExport = selectedFullTests.value
+  const fullTestIds = testsToExport.map(test => test.id)
+
+  if (fullTestIds.length === 0) {
+    alert('Choose at least one full test to export')
+    return
+  }
+
+  exportingSelectedFullTests.value = true
+  exportingFullTestIds.value = [...new Set([...exportingFullTestIds.value, ...fullTestIds])]
+  try {
+    const exportJson = await invoke('export_full_tests', {
+      fullTestIds
+    })
+    const blob = new Blob([exportJson], { type: 'application/json' })
+    const downloadUrl = URL.createObjectURL(blob)
+    const downloadLink = document.createElement('a')
+    downloadLink.href = downloadUrl
+    downloadLink.download = `cefr-full-tests-${new Date().toISOString().slice(0, 10)}.json`
+    document.body.appendChild(downloadLink)
+    downloadLink.click()
+    downloadLink.remove()
+    URL.revokeObjectURL(downloadUrl)
+    alert(`Exported ${fullTestIds.length} full test(s) successfully.`)
+  } catch (error) {
+    console.error('Failed to export selected full tests:', error)
+    alert('Error exporting selected full tests: ' + (error?.message || String(error)))
+  } finally {
+    exportingFullTestIds.value = exportingFullTestIds.value.filter(id => !fullTestIds.includes(id))
+    exportingSelectedFullTests.value = false
   }
 }
 
@@ -2132,8 +2242,29 @@ watch(recordingsByAttempt, (groups) => {
   border: 1px solid rgba(148, 163, 184, 0.3);
 }
 
+.full-test-card.selected {
+  border-color: #2563eb;
+  background: #eff6ff;
+}
+
 .full-test-main {
   min-width: 0;
+}
+
+.full-test-select {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  color: #475569;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.full-test-select input {
+  width: 16px;
+  height: 16px;
+  accent-color: #2563eb;
 }
 
 .full-test-main h3 {

@@ -20,6 +20,7 @@ fn main() {
             get_full_tests,
             delete_full_test,
             export_full_test,
+            export_full_tests,
             import_full_test,
             export_questions,
             import_questions,
